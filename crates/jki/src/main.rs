@@ -1,5 +1,5 @@
 use clap::Parser;
-use jki_core::{search_accounts, paths::JkiPath, Account, AccountSecret, acquire_master_key, decrypt_with_master_key};
+use jki_core::{search_accounts, paths::JkiPath, Account, AccountSecret, acquire_master_key, decrypt_with_master_key, integrate_accounts, generate_otp};
 use std::fs;
 use std::process;
 use std::collections::HashMap;
@@ -23,23 +23,6 @@ struct Args {
 struct MetadataFile {
     accounts: Vec<Account>,
     version: u32,
-}
-
-fn generate_otp(acc: &Account) -> String {
-    use totp_rs::{Algorithm, TOTP, Secret};
-    let secret_str = acc.secret.trim().replace(" ", "");
-    let secret = Secret::Encoded(secret_str).to_bytes().expect("Failed to decode secret");
-    
-    // 使用 new_unchecked 繞過 RFC 對長度的強硬要求 (128 bits)
-    let totp = TOTP::new_unchecked(
-        Algorithm::SHA1, 
-        acc.digits as usize, 
-        1, 
-        30, 
-        secret
-    );
-    
-    totp.generate_current().unwrap()
 }
 
 fn main() {
@@ -75,19 +58,7 @@ fn main() {
     let sec_json = decrypt_with_master_key(&sec_encrypted, &master_key).expect("Decryption failed");
     let secrets_map: HashMap<String, AccountSecret> = serde_json::from_slice(&sec_json).expect("Secrets parse error");
 
-    let mut integrated_accounts = Vec::new();
-    let mut missing_ids = Vec::new();
-
-    for mut acc in meta_data.accounts {
-        if let Some(s) = secrets_map.get(&acc.id) {
-            acc.secret = s.secret.clone();
-            acc.digits = s.digits;
-            acc.algorithm = s.algorithm.clone();
-            integrated_accounts.push(acc);
-        } else {
-            missing_ids.push(acc.name.clone());
-        }
-    }
+    let (integrated_accounts, missing_ids) = integrate_accounts(meta_data.accounts, &secrets_map);
 
     if !missing_ids.is_empty() && !args.quiet {
         eprintln!("Data Consistency Warning: Some accounts are missing secrets.");
@@ -118,14 +89,17 @@ fn main() {
     } else {
         if !args.quiet { eprintln!("{}:", if args.list { "Matches" } else { "Ambiguous results" }); }
         for (i, acc) in results.iter().enumerate() {
-            let otp_str = if args.otp { format!("{} - ", generate_otp(acc)) } else { "".to_string() };
+            let otp_str = if args.otp { format!("{} - ", generate_otp(acc).unwrap_or("ERROR".to_string())) } else { "".to_string() };
             println!("{:2}) {}{}{}", i + 1, otp_str, acc.issuer.as_deref().map(|s| format!("[{}] ", s)).unwrap_or_default(), acc.name);
         }
         process::exit(2);
     };
 
     if let Some(acc) = target {
-        let otp = generate_otp(acc);
+        let otp = generate_otp(acc).unwrap_or_else(|e| {
+            eprintln!("OTP generation failed: {}", e);
+            process::exit(102);
+        });
         let label = format!("{}{}", acc.issuer.as_deref().map(|s| format!("[{}] ", s)).unwrap_or_default(), acc.name);
         
         if !args.quiet { eprintln!("Selected: {}", label); }
@@ -140,5 +114,26 @@ fn main() {
                 let _ = Notification::new().summary("jki: OTP Copied").body(&format!("Account: {}", label)).show();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_args_parsing() {
+        let args = Args::try_parse_from(["jki", "google", "gmail", "-l", "-o"]).unwrap();
+        assert_eq!(args.patterns, vec!["google", "gmail"]);
+        assert!(args.list);
+        assert!(args.otp);
+        assert!(!args.quiet);
+    }
+
+    #[test]
+    fn test_args_stdout_short() {
+        let args = Args::try_parse_from(["jki", "google", "-s"]).unwrap();
+        assert!(args.stdout);
     }
 }

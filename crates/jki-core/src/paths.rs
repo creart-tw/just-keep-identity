@@ -75,3 +75,54 @@ impl JkiPath {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_jki_home_override() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().to_str().unwrap();
+        std::env::set_var("JKI_HOME", home);
+        
+        let config_dir = JkiPath::config_dir();
+        assert_eq!(config_dir, PathBuf::from(home));
+        
+        std::env::remove_var("JKI_HOME");
+    }
+
+    #[test]
+    fn test_metadata_path_override() {
+        let path = "/tmp/custom_metadata.json";
+        std::env::set_var("JKI_METADATA_PATH", path);
+        
+        let metadata_path = JkiPath::metadata_path();
+        assert_eq!(metadata_path, PathBuf::from(path));
+        
+        std::env::remove_var("JKI_METADATA_PATH");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_check_secure_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("secure.key");
+        
+        // 1. File does not exist
+        assert!(JkiPath::check_secure_permissions(&file_path).is_err());
+        
+        // 2. Create file with 0600
+        fs::File::create(&file_path).unwrap();
+        fs::set_permissions(&file_path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(JkiPath::check_secure_permissions(&file_path).is_ok());
+        
+        // 3. Insecure permissions (0644)
+        fs::set_permissions(&file_path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(JkiPath::check_secure_permissions(&file_path).is_err());
+    }
+}

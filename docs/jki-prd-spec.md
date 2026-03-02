@@ -1,69 +1,76 @@
 # **Just Keep Identity (jki)：JK Suite 極速 MFA 數位金庫**
 
-## **產品需求 (PRD) 與技術規格 (Spec) 文件 - V20 (全平台適應與降級機制版)**
+## **產品需求 (PRD) 與技術規格 (Spec) 文件 - V21 (安全架構與交互細節同步版)**
 
 ### **第一章：品牌與體系定義 (Brand & System)**
 
 #### **1.1 品牌命名決策**
 *   **正式名稱**：**Just Keep Identity (jki)**。
-*   **人體工學**：主打 **右手單手操作**，支援本地與遠端開發環境。
+*   **人體工學**：主打 **右手單手操作 (Micro-Roll)**，支援本地 (Desktop) 與遠端 (SSH/Headless) 環境。
 
 #### **1.2 平台支援矩陣 (Support Matrix)**
 *   **Tier 1 (Desktop)**：macOS, Windows。支援生體辨識 (TouchID / Hello ESS)。
-*   **Tier 2 (Linux Local)**：支援 Secret Service (libsecret) 與 TPM 整合。
-*   **Tier 3 (Headless / SSH)**：支援環境變數、手動密碼輸入與 Socket Forwarding。
+*   **Tier 2 (Headless / SSH)**：支援 0600 金鑰檔案、環境變數與互動式密碼輸入。
 
 ### ---
 
 **第二章：交互邏輯與 Unix 工具鏈規範 (CLI Standards)**
 
-#### **2.1 查詢行為精煉**
+#### **2.1 查詢行為與一致性 (Consistency)**
 *   **單一結果**：複製 OTP / 輸出 stdout。
 *   **清單模式 (預設)**：僅顯示 Metadata，**不計算 OTP** 以確保極速與安全。
-*   **清單模式 (手動)**：`-o` / `--otp` 強制計算並顯示所有 OTP。
+*   **不一致處理 (Missing Secrets)**：
+    *   **預設行為**：偵測到 Metadata 有帳號但加密庫無 Secret 時，印出 Warning 並列出受影響項目。
+    *   **安靜模式 (-q)**：自動過濾遺失密鑰的帳號，不顯示 Warning，僅從搜尋池中移除。
 
 #### **2.2 參數規範**
-*   `-q`: 安靜模式。
-*   `-`: stdout 模式。
-*   `--list`: 強制顯示清單。
-*   `--`: 終止解析。
+*   `-q`: 安靜模式 (抑制 stderr 提示與一致性警告)。
+*   `-`: stdout 模式 (純淨輸出 OTP)。
+*   `--list`: 強制顯示匹配清單。
+*   `-o / --otp`: 在清單模式下強制計算並顯示 OTP。
+*   `--`: 終止選項解析。
 
 ### ---
 
 **第三章：數據層與安全性 (Technical Spec)**
 
-#### **3.1 認證雙軌制 (Dual Path Auth)**
-*   **Path A: Static Key (0600 File)**：適用於自動化與遠端環境。
-*   **Path B: Agent Session (Biometric)**：適用於桌面環境，Master Key 僅留存於記憶體。
+#### **3.1 認證體系 (Hardened Auth)**
+*   **交互式輸入 (Indicator)**：實現「切換式狀態指示器」以防範長度洩漏並提供焦點回饋。
+    *   空值：`[ _ ]`
+    *   輸入/刪除動作：在 `[ * ]` 與 `[ x ]` 之間循環切換。
+*   **優先順序 (Precedence)**：
+    1.  **0600 靜態金鑰檔案** (預設 `~/.config/jki/master.key`)。
+    2.  **Agent Session** (記憶體快取)。
+    3.  **互動式詢問** (Stdin)。
 
-#### **3.2 jkim 管理功能擴充**
-*   **Key Setup**：建立靜態金鑰檔案並自動設置 0600 權限。
-*   **Git Integration**：
-    *   `jkim init`：初始化 JKI 倉庫、生成 .gitignore 與 .gitattributes。
-    *   `jkim sync`：一鍵執行 Add/Commit/Pull/Push 同步流。
-    *   `jkim remote`：轉接至原生 git remote 指令。
-*   **Auth Status**：`jkim status` 回報目前的認證路徑、Git 同步狀態與 Agent 存活狀態。
-*   **Session Logout**：`jkim logout` 通知 Agent 立即清除記憶體快取。
+#### **3.2 環境變數優先級**
+*   `JKI_HOME`：全域根目錄覆寫。
+*   `JKI_METADATA_PATH`：索引檔路徑覆寫。
+*   `JKI_SECRETS_PATH`：加密秘密檔路徑覆寫。
+*   `JKI_MASTER_KEY_PATH`：金鑰檔案路徑覆寫。
+
+#### **3.3 資料拆分保護**
+*   **`vault.metadata.json`**：僅含搜尋 Metadata，不含加密欄位。
+*   **`vault.secrets.json.age`**：整包加密之秘密資料庫 (Passphrase-based age encryption)。
 
 ### ---
 
 **第四章：實作路徑 (Roadmap)**
 
 1.  **Phase 1: Foundation**：Workspace 建立、Python MVP 驗證 (Done)。
-2.  **Phase 2: Core Executor (jki)**：Rust 實作、系統整合、參數解析 (In Progress)。
-3.  **Phase 3: Agent & IPC (jki-agent)**：跨平台 Socket、認證降級路徑、ID-based 協議。
-4.  **Phase 4: Management (jkim)**：TUI 管理、數據優化與加密轉檔。
-5.  **Phase 5: Remote & Linux**：SSH Socket Forwarding 驗證、Linux 系統整合。
+2.  **Phase 2: Core Executor (jki)**：Rust 實作、系統整合、資料拆分加密 (Done)。
+3.  **Phase 3: Management (jkim)**：Git 整合 (init/sync/remote)、TUI 編輯器 (In Progress)。
+4.  **Phase 4: Agent & IPC (jki-agent)**：跨平台 Socket、記憶體 Session 快取。
+5.  **Phase 5: Refinement**：二進位優化 (rkyv)、WSL 橋接、安裝腳本。
 
 ### ---
 
 **第五章：安全性硬化 (Security Hardening)**
 
 #### **5.1 認證隔離**
-*   `jki` (Client) 僅處理搜尋與 Metadata。
-*   `jki-agent` (Server) 負責保管 Master Key 與計算 OTP。
-*   **ID 通訊**：Client 傳遞 UUID，Server 回傳單一 OTP。
+*   `jki` 於 Standalone 模式下執行「啟動即解鎖、全量整合」，確保記憶體內資料完整性。
+*   敏感資料欄位 (`secret`, `digits`, `algorithm`) 嚴禁出現於 `metadata.json` 中。
 
 #### **5.2 記憶體防護**
-*   敏感數據使用 `Zeroize` 抹除。
-*   支援 `mlock` 防止交換至磁碟。
+*   使用 `SecretString` (secrecy) 保護 Master Key。
+*   (待實作) `mlock` 防止交換與 `Zeroize` 主動抹除。

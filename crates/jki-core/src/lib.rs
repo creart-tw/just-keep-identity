@@ -42,6 +42,42 @@ pub struct AccountSecret {
     pub algorithm: String,
 }
 
+use std::collections::HashMap;
+
+pub fn integrate_accounts(metadata: Vec<Account>, secrets: &HashMap<String, AccountSecret>) -> (Vec<Account>, Vec<String>) {
+    let mut integrated = Vec::new();
+    let mut missing = Vec::new();
+    for mut acc in metadata {
+        if let Some(s) = secrets.get(&acc.id) {
+            acc.secret = s.secret.clone();
+            acc.digits = s.digits;
+            acc.algorithm = s.algorithm.clone();
+            integrated.push(acc);
+        } else {
+            missing.push(acc.name.clone());
+        }
+    }
+    (integrated, missing)
+}
+
+use totp_rs::{Algorithm, TOTP, Secret};
+
+pub fn generate_otp(acc: &Account) -> Result<String, String> {
+    let secret_str = acc.secret.trim().replace(" ", "");
+    let secret = Secret::Encoded(secret_str).to_bytes().map_err(|e| e.to_string())?;
+    
+    // 使用 new_unchecked 繞過 RFC 對長度的強硬要求 (128 bits)
+    let totp = TOTP::new_unchecked(
+        Algorithm::SHA1, 
+        acc.digits as usize, 
+        1, 
+        30, 
+        secret
+    );
+    
+    Ok(totp.generate_current().unwrap())
+}
+
 // --- 加解密核心 ---
 
 pub fn encrypt_with_master_key(data: &[u8], master_key: &SecretString) -> Result<Vec<u8>, String> {
@@ -156,5 +192,139 @@ pub mod git {
             is_clean: s.stdout.is_empty(),
             has_remote: !r.stdout.is_empty(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fuzzy_match() {
+        assert!(fuzzy_match("gg", "Google"));
+        assert!(fuzzy_match("goog", "Google"));
+        assert!(fuzzy_match("gle", "Google"));
+        assert!(fuzzy_match("G", "Google"));
+        assert!(!fuzzy_match("ga", "Google"));
+    }
+
+    #[test]
+    fn test_search_accounts() {
+        let accounts = vec![
+            Account {
+                id: "1".to_string(),
+                name: "Gmail".to_string(),
+                issuer: Some("Google".to_string()),
+                account_type: AccountType::Standard,
+                secret: "".to_string(),
+                digits: 6,
+                algorithm: "SHA1".to_string(),
+            },
+            Account {
+                id: "2".to_string(),
+                name: "Facebook".to_string(),
+                issuer: None,
+                account_type: AccountType::Standard,
+                secret: "".to_string(),
+                digits: 6,
+                algorithm: "SHA1".to_string(),
+            },
+        ];
+
+        // Match Google
+        let results = search_accounts(&accounts, &vec!["goog".to_string()]);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "Gmail");
+
+        // Match multiple patterns
+        let results = search_accounts(&accounts, &vec!["g".to_string(), "mail".to_string()]);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "Gmail");
+
+        // No match
+        let results = search_accounts(&accounts, &vec!["xyz".to_string()]);
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_crypto_roundtrip() {
+        let master_key = SecretString::from("correct horse battery staple".to_string());
+        let data = b"sensitive data";
+        
+        let encrypted = encrypt_with_master_key(data, &master_key).unwrap();
+        let decrypted = decrypt_with_master_key(&encrypted, &master_key).unwrap();
+        
+        assert_eq!(data.as_slice(), decrypted.as_slice());
+    }
+
+    #[test]
+    fn test_crypto_wrong_password() {
+        let master_key = SecretString::from("correct horse battery staple".to_string());
+        let wrong_key = SecretString::from("wrong password".to_string());
+        let data = b"sensitive data";
+        
+        let encrypted = encrypt_with_master_key(data, &master_key).unwrap();
+        let decrypted = decrypt_with_master_key(&encrypted, &wrong_key);
+        
+        assert!(decrypted.is_err());
+    }
+
+    #[test]
+    fn test_git_check_status() {
+        use std::process::Command;
+        use tempfile::tempdir;
+        
+        let dir = tempdir().unwrap();
+        let repo_path = dir.path();
+        
+        // 1. Not a git repo
+        assert!(git::check_status(repo_path).is_none());
+        
+        // 2. Init git repo
+        Command::new("git").args(["init"]).current_dir(repo_path).output().unwrap();
+        // Need a commit to have a branch
+        Command::new("git").args(["config", "user.email", "you@example.com"]).current_dir(repo_path).output().unwrap();
+        Command::new("git").args(["config", "user.name", "Your Name"]).current_dir(repo_path).output().unwrap();
+        std::fs::write(repo_path.join("file"), "content").unwrap();
+        Command::new("git").args(["add", "."]).current_dir(repo_path).output().unwrap();
+        Command::new("git").args(["commit", "-m", "initial"]).current_dir(repo_path).output().unwrap();
+        
+        let status = git::check_status(repo_path).unwrap();
+        assert!(status.branch == "master" || status.branch == "main");
+        assert!(status.is_clean);
+        assert!(!status.has_remote);
+    }
+
+    #[test]
+    fn test_integrate_accounts() {
+        let metadata = vec![
+            Account { id: "1".to_string(), name: "A".to_string(), issuer: None, account_type: AccountType::Standard, secret: "".to_string(), digits: 6, algorithm: "".to_string() },
+            Account { id: "2".to_string(), name: "B".to_string(), issuer: None, account_type: AccountType::Standard, secret: "".to_string(), digits: 6, algorithm: "".to_string() },
+        ];
+        let mut secrets = HashMap::new();
+        secrets.insert("1".to_string(), AccountSecret { secret: "S1".to_string(), digits: 6, algorithm: "SHA1".to_string() });
+        
+        let (integrated, missing) = integrate_accounts(metadata, &secrets);
+        assert_eq!(integrated.len(), 1);
+        assert_eq!(integrated[0].id, "1");
+        assert_eq!(integrated[0].secret, "S1");
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0], "B");
+    }
+
+    #[test]
+    fn test_generate_otp() {
+        let acc = Account {
+            id: "1".to_string(),
+            name: "Test".to_string(),
+            issuer: None,
+            account_type: AccountType::Standard,
+            secret: "JBSWY3DPEHPK3PXP".to_string(), // base32 for "Hello!"
+            digits: 6,
+            algorithm: "SHA1".to_string(),
+        };
+        let otp = generate_otp(&acc).unwrap();
+        assert_eq!(otp.len(), 6);
+        assert!(otp.chars().all(|c| c.is_ascii_digit()));
     }
 }
