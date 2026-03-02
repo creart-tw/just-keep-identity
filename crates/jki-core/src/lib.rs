@@ -38,3 +38,26 @@ impl Vault {
         }
     }
 }
+
+pub fn fuzzy_match(pattern: &str, target: &str) -> bool {
+    let pattern = pattern.to_lowercase();
+    let target = target.to_lowercase();
+    let mut target_chars = target.chars();
+    for p in pattern.chars() {
+        if !target_chars.any(|t| t == p) {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn search_accounts(accounts: &[Account], patterns: &[String]) -> Vec<Account> {
+    accounts
+        .iter()
+        .filter(|acc| {
+            let target_str = format!("{} {}", acc.issuer.as_deref().unwrap_or_default(), acc.name);
+            patterns.iter().all(|p| fuzzy_match(p, &target_str))
+        })
+        .cloned()
+        .collect()
+}

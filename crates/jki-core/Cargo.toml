@@ -11,3 +11,4 @@ serde_json = "1.0"
 age = "0.10"
 url = "2"
 base32 = "0.4"
+uuid = { version = "1.0", features = ["v4"] }

@@ -30,14 +30,17 @@ def search_accounts(accounts, patterns):
         if all(fuzzy_match(p, target_str) for p in patterns):
             results.append(acc)
     return results
+
 @app.command()
 def main(
     patterns: List[str] = typer.Argument(None, help="Search patterns"),
     force_list: bool = typer.Option(False, "--list", help="Force listing results"),
+    show_otp: bool = typer.Option(False, "--otp", "-o", help="Show OTPs in list view"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress stderr output"),
 ):
-    # ...
-
+    """
+    Just Keep Identity (jki) MVP - Sequential Fuzzy Search & OTP Generator
+    """
     # Load data
     vault_path = "data/private/vault.json"
     if not os.path.exists(vault_path):
@@ -60,11 +63,15 @@ def main(
 
     # If no search terms, list ALL
     if not search_terms:
-        console.print("[bold blue]All Accounts:[/bold blue]")
+        if not quiet:
+            console.print("[bold blue]All Accounts:[/bold blue]")
         for idx, acc in enumerate(accounts, 1):
-            totp = pyotp.TOTP(acc['secret'], digits=acc.get('digits', 6))
             issuer_str = f"[[yellow]{acc['issuer']}[/yellow]] " if acc.get('issuer') else ""
-            console.print(f"{idx:2}) [bold green]{totp.now()}[/bold green] - {issuer_str}{acc['name']}")
+            otp_str = ""
+            if show_otp:
+                totp = pyotp.TOTP(acc['secret'], digits=acc.get('digits', 6))
+                otp_str = f"[bold green]{totp.now()}[/bold green] - "
+            console.print(f"{idx:2}) {otp_str}{issuer_str}{acc['name']}")
         raise typer.Exit(code=0)
 
     # Handle Index Selection (if last term is digit)
@@ -76,7 +83,8 @@ def main(
     results = search_accounts(accounts, search_terms)
 
     if not results:
-        console.print(f"[red]No matches for patterns: {search_terms}[/red]")
+        if not quiet:
+            console.print(f"[red]No matches for patterns: {search_terms}[/red]")
         raise typer.Exit(code=1)
 
     # Selection Logic
@@ -86,16 +94,21 @@ def main(
         if 1 <= index_selection <= len(results):
             target = results[index_selection - 1]
         else:
-            console.print(f"[red]Error: Index {index_selection} out of range.[/red]")
+            if not quiet:
+                console.print(f"[red]Error: Index {index_selection} out of range.[/red]")
             raise typer.Exit(code=2)
     else:
         # Display List (Ambiguous or forced)
-        title = "Matches" if force_list else f"Ambiguous results ({len(results)} matches)"
-        console.print(f"[bold yellow]{title}:[/bold yellow]")
+        if not quiet:
+            title = "Matches" if force_list else f"Ambiguous results ({len(results)} matches)"
+            console.print(f"[bold yellow]{title}:[/bold yellow]")
         for idx, acc in enumerate(results, 1):
-            totp = pyotp.TOTP(acc['secret'], digits=acc.get('digits', 6))
             issuer_str = f"[[yellow]{acc['issuer']}[/yellow]] " if acc.get('issuer') else ""
-            console.print(f"{idx:2}) [bold green]{totp.now()}[/bold green] - {issuer_str}{acc['name']}")
+            otp_str = ""
+            if show_otp:
+                totp = pyotp.TOTP(acc['secret'], digits=acc.get('digits', 6))
+                otp_str = f"[bold green]{totp.now()}[/bold green] - "
+            console.print(f"{idx:2}) {otp_str}{issuer_str}{acc['name']}")
         raise typer.Exit(code=2)
 
     # Execution: Generate and Output
@@ -108,7 +121,6 @@ def main(
         console.print(f"Selected: [bold cyan]{target['name']}{issuer_label}[/bold cyan]")
 
     if to_stdout:
-        # Pure stdout output
         print(otp_code)
     else:
         pyperclip.copy(otp_code)

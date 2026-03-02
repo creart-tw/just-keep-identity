@@ -30,6 +30,7 @@ pub fn parse_otpauth_uri(uri: &str) -> Option<Account> {
     };
 
     Some(Account {
+        id: uuid::Uuid::new_v4().to_string(), // 自動為新匯入項產生 ID
         name: name.replace('+', " "), // Unescape spaces from WinAuth format
         issuer: issuer.or(issuer_from_query),
         secret,
