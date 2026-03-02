@@ -35,10 +35,7 @@
 
 ### **3.1 環境初始化 (init)**
 `jkim init [--force]`
-*   **預設行為 (Transparent Init)**：
-    *   檢查並回報目錄狀態。
-    *   建立 `.gitignore` 與 `.gitattributes`。
-    *   **衝突偵測**：若目錄內已存有 `vault.*` 檔案，印出 **[Data Warning]**。
+*   **預設行為 (Transparent Init)**：檢查環境並回報狀態。若有衝突則提示警告。
 *   **旗標**:
     *   `-f, --force`: **重置模式**。刪除現有的 `vault.metadata.json` 與 `vault.secrets.bin.age`，重新建立乾淨的金庫環境。
 
@@ -46,19 +43,20 @@
 `jkim master-key <SUBCOMMAND>`
 *   `set [--force]`: 將 Master Key 寫入 `master.key` (0600)。
 *   `remove [--force]`: 刪除磁碟上的 `master.key`。
-*   `change [--commit]`: 
-    1. 讀取舊金鑰（支援 `-I` 手動輸入）。
-    2. 解密現有金庫。
-    3. 設定新金鑰。
-    4. 原子化重新加密並覆寫。
+*   `change [--commit]`: 重新加密金庫並變更金鑰。
 
-### **3.3 資料編輯 (edit)**
+### **3.3 資料匯入 (import-winauth)**
+`jkim import-winauth <FILE> [--overwrite] [--force-new-vault]`
+*   **預設行為**：嘗試使用 Master Key 解密現有金庫以進行「增量合併 (Merge)」。
+*   **旗標**:
+    *   `--overwrite`: 若匯入項目與現有帳號重複，則強制覆寫 Metadata 與 Secret。
+    *   `--force-new-vault`: **強制作廢模式**。若無法解密現有金庫（如密碼錯誤或金庫毀損），則直接放棄舊資料，以本次輸入的密碼建立全新的金庫並完成匯入。
+
+### **3.4 資料編輯 (edit)**
 `jkim edit`
-*   採用 `crontab -e` 流程。
-*   開啟 `$EDITOR` 編輯 `metadata.json` 的臨時副本。
-*   儲存後自動執行 JSON Schema 驗證，成功後才覆寫正式檔案。
+*   採用 `crontab -e` 流程。開啟 `$EDITOR` 並於儲存後執行 JSON 驗證。
 
-### **3.4 同步 (sync)**
+### **3.5 同步 (sync)**
 `jkim sync`
 *   執行 Git 原子化備份：`add` -> `commit` -> `pull --rebase` -> `push`。
 
@@ -67,12 +65,9 @@
 ## **4. 輸出規範 (Output Standards)**
 
 ### **4.1 訊息流向**
-*   **stderr**: 用於提示、警告、進度報告、以及「切換式狀態指示器」密碼輸入。
-*   **stdout**: 僅用於純淨的資料輸出（如 OTP 碼、JSON 導出）。
+*   **stderr**: 用於提示、警告、以及密碼輸入。
+*   **stdout**: 僅用於純淨的資料輸出。
 
-### **4.2 錯誤處理**
-*   **Fail-Fast**: 密碼錯誤或環境不安全時，應立即印出錯誤訊息並退出，不進行不必要的重試。
-*   **Exit Codes**:
-    *   `0`: 成功。
-    *   `1`: 一般錯誤 (如查無帳號)。
-    *   `100-110`: 環境/安全性錯誤。
+### **4.2 錯誤處理與解決方案引導**
+*   **禁止 Panic**: 嚴禁在正常業務流程中發生 Thread Panic。
+*   **解決方案導引**: 當發生「密碼錯誤」或「資料衝突」時，系統必須在錯誤訊息後條列式提供可能的解決方案（如建議使用的旗標或手動排除步驟）。

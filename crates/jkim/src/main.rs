@@ -55,6 +55,9 @@ enum Commands {
         /// Overwrite existing accounts if name+issuer matches
         #[arg(short, long)]
         overwrite: bool,
+        /// If decryption fails, discard existing vault and create a new one
+        #[arg(long)]
+        force_new_vault: bool,
     },
 }
 
@@ -394,7 +397,7 @@ fn handle_init(force: bool) {
     println!("  - Run 'jkim import-winauth <file>' to add accounts.");
 }
 
-fn handle_import_winauth(file: &PathBuf, overwrite: bool, force_interactive: bool, interactor: &dyn Interactor) {
+fn handle_import_winauth(file: &PathBuf, overwrite: bool, force_interactive: bool, interactor: &dyn Interactor, force_new_vault: bool) {
     if !file.exists() { eprintln!("Error: File not found."); return; }
 
     let meta_path = JkiPath::metadata_path();
@@ -409,17 +412,33 @@ fn handle_import_winauth(file: &PathBuf, overwrite: bool, force_interactive: boo
 
     // 2. Load existing Metadata
     let mut metadata = if meta_path.exists() {
-        let content = fs::read_to_string(&meta_path).unwrap();
-        serde_json::from_str::<MetadataFile>(&content).unwrap()
+        let content = fs::read_to_string(&meta_path).unwrap_or_default();
+        serde_json::from_str::<MetadataFile>(&content).unwrap_or(MetadataFile { accounts: vec![], version: 1 })
     } else {
         MetadataFile { accounts: vec![], version: 1 }
     };
 
     // 3. Load and Decrypt existing Secrets (Merge-aware)
     let mut secrets_map: HashMap<String, AccountSecret> = if sec_path.exists() {
-        let encrypted = fs::read(&sec_path).expect("Failed to read secrets");
-        let decrypted = decrypt_with_master_key(&encrypted, &master_key).expect("Failed to decrypt existing secrets. Is the master key correct?");
-        serde_json::from_slice(&decrypted).expect("Failed to parse secrets JSON")
+        let encrypted = fs::read(&sec_path).expect("Failed to read secrets file");
+        match decrypt_with_master_key(&encrypted, &master_key) {
+            Ok(decrypted) => serde_json::from_slice(&decrypted).expect("Failed to parse existing secrets JSON"),
+            Err(e) => {
+                if force_new_vault {
+                    println!("\n[Warning] Decryption failed: {}. --force-new-vault is set, discarding existing data.", e);
+                    metadata = MetadataFile { accounts: vec![], version: 1 };
+                    HashMap::new()
+                } else {
+                    eprintln!("\n[Error] Master Key incorrect for the existing vault ({}).", e);
+                    eprintln!("\nPossible solutions:");
+                    eprintln!("  1. Re-run with the correct Master Key.");
+                    eprintln!("  2. If you want to DISCARD the existing vault and start fresh:");
+                    eprintln!("     - Use 'jkim import-winauth <file> --force-new-vault'");
+                    eprintln!("     - Or run 'jkim init --force' first to clean the environment.");
+                    std::process::exit(101);
+                }
+            }
+        }
     } else {
         HashMap::new()
     };
@@ -483,7 +502,8 @@ fn main() {
         Commands::Sync => handle_sync(),
         Commands::Edit => handle_edit(),
         Commands::MasterKey(m) => handle_master_key(m, cli.interactive, &interactor),
-        Commands::ImportWinauth { file, overwrite } => handle_import_winauth(file, *overwrite, cli.interactive, &interactor),
+        Commands::ImportWinauth { file, overwrite, force_new_vault } => 
+            handle_import_winauth(file, *overwrite, cli.interactive, &interactor, *force_new_vault),
     }
 }
 
