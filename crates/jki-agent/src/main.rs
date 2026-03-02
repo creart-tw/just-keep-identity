@@ -49,14 +49,17 @@ fn handle_client_io<S: Read + Write>(stream: S) -> io::Result<()> {
             Err(e) => return Err(e),
         };
 
+        if line.trim().is_empty() { continue; }
+
         let req: Request = match serde_json::from_str(&line) {
             Ok(r) => r,
             Err(e) => {
                 let resp = Response::Error(format!("Invalid request: {}", e));
-                let mut stream = reader.into_inner();
-                stream.write_all(format!("{}\n", serde_json::to_string(&resp).unwrap()).as_bytes())?;
-                stream.flush()?;
-                return Ok(());
+                let mut s = reader.into_inner();
+                s.write_all(format!("{}\n", serde_json::to_string(&resp).unwrap()).as_bytes())?;
+                s.flush()?;
+                reader = BufReader::new(s);
+                continue;
             }
         };
 
@@ -83,37 +86,25 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
-    #[test]
-    fn test_handle_client_ping() {
-        let input = "\"Ping\"\n";
-        let mut _output: Vec<u8> = Vec::new();
-        let mut _stream = Cursor::new(input.as_bytes().to_vec());
-        
-        // We need a combined Read + Write for Cursor, but Cursor<&mut Vec<u8>> is tricky.
-        // Let's use a simple mock structure or just test with a real socket later if needed.
-        // Actually, we can just use a Vec for write and Cursor for read if we split the logic,
-        // but let's keep it simple for now and use a temporary socket.
+    struct MockStream {
+        input: Cursor<Vec<u8>>,
+        output: Vec<u8>,
+    }
+    impl Read for MockStream {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> { self.input.read(buf) }
+    }
+    impl Write for MockStream {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> { self.output.write(buf) }
+        fn flush(&mut self) -> io::Result<()> { Ok(()) }
     }
 
     #[test]
-    fn test_handle_client_logic() {
+    fn test_handle_client_ping() {
         let req = Request::Ping;
-        let mut input = serde_json::to_vec(&req).unwrap();
-        input.push(b'\n');
+        let mut input_data = serde_json::to_vec(&req).unwrap();
+        input_data.push(b'\n');
         
-        struct MockStream {
-            input: Cursor<Vec<u8>>,
-            output: Vec<u8>,
-        }
-        impl Read for MockStream {
-            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> { self.input.read(buf) }
-        }
-        impl Write for MockStream {
-            fn write(&mut self, buf: &[u8]) -> io::Result<usize> { self.output.write(buf) }
-            fn flush(&mut self) -> io::Result<()> { Ok(()) }
-        }
-
-        let mut stream = MockStream { input: Cursor::new(input), output: Vec::new() };
+        let mut stream = MockStream { input: Cursor::new(input_data), output: Vec::new() };
         handle_client_io(&mut stream).unwrap();
 
         let resp_str = String::from_utf8(stream.output).unwrap();
@@ -121,6 +112,20 @@ mod tests {
         match resp {
             Response::Pong => {},
             _ => panic!("Expected Pong, got {:?}", resp),
+        }
+    }
+
+    #[test]
+    fn test_handle_client_malformed_json() {
+        let input_data = b"not a json\n";
+        let mut stream = MockStream { input: Cursor::new(input_data.to_vec()), output: Vec::new() };
+        handle_client_io(&mut stream).unwrap();
+
+        let resp_str = String::from_utf8(stream.output).unwrap();
+        let resp: Response = serde_json::from_str(&resp_str).unwrap();
+        match resp {
+            Response::Error(msg) => assert!(msg.contains("Invalid request")),
+            _ => panic!("Expected Error response, got {:?}", resp),
         }
     }
 }

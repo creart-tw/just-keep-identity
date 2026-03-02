@@ -3,7 +3,7 @@ use jki_core::{
     agent::{Request, Response},
     generate_otp, integrate_accounts, paths::JkiPath,
     Account, AccountSecret, acquire_master_key, decrypt_with_master_key, search_accounts,
-    TerminalInteractor, Interactor
+    TerminalInteractor
 };
 use interprocess::local_socket::LocalSocketStream;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -313,6 +313,7 @@ mod tests {
         let cli = Cli {
             command: None,
             patterns: vec!["google".to_string()],
+            interactive: false,
             list: false,
             otp: false,
             quiet: true,
