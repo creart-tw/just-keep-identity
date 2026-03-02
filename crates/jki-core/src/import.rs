@@ -19,23 +19,31 @@ pub fn parse_otpauth_uri(uri: &str) -> Option<Account> {
     let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
     let secret = query.get("secret")?.clone();
     let digits = query.get("digits").and_then(|d| d.parse::<u32>().ok()).unwrap_or(6);
-    let issuer_from_query = query.get("issuer").cloned();
+    let issuer_query = query.get("issuer").cloned();
     
-    let account_type = if issuer.as_deref() == Some("Steam") || issuer_from_query.as_deref() == Some("Steam") {
+    let effective_issuer = issuer.clone().or(issuer_query);
+    let account_type = if effective_issuer.as_deref() == Some("Steam") {
         AccountType::Steam
-    } else if issuer.as_deref() == Some("BattleNet") || issuer_from_query.as_deref() == Some("BattleNet") {
+    } else if effective_issuer.as_deref() == Some("BattleNet") {
         AccountType::Blizzard
     } else {
         AccountType::Standard
     };
 
     Some(Account {
-        id: uuid::Uuid::new_v4().to_string(), // 自動為新匯入項產生 ID
-        name: name.replace('+', " "), // Unescape spaces from WinAuth format
-        issuer: issuer.or(issuer_from_query),
+        id: uuid::Uuid::new_v4().to_string(),
+        name: urllib_unquote(&name.replace('+', " ")),
+        issuer: effective_issuer,
+        account_type,
         secret,
         digits,
-        algorithm: "SHA1".to_string(), // Default for TOTP
-        account_type,
+        algorithm: "SHA1".to_string(),
     })
+}
+
+fn urllib_unquote(s: &str) -> String {
+    url::form_urlencoded::parse(s.as_bytes())
+        .map(|(k, _)| k.into_owned())
+        .collect::<Vec<_>>()
+        .join("")
 }

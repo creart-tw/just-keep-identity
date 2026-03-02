@@ -19,6 +19,11 @@ vault.json
 .DS_Store
 Thumbs.db
 
+# Python / Tools
+.ruff_cache/
+.venv/
+__pycache__/
+
 # Private data
 data/
 vault.json

@@ -1,152 +1,143 @@
 use clap::Parser;
-use jki_core::{Account, search_accounts};
+use jki_core::{search_accounts, paths::JkiPath, Account, AccountSecret, acquire_master_key, decrypt_with_master_key};
 use std::fs;
-use std::path::Path;
 use std::process;
+use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
 
-/// Just Keep Identity (jki) - 極速執行器
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// 搜尋關鍵字 (不分大小寫，交集模糊匹配)
     patterns: Vec<String>,
-
-    /// 強制顯示列表，不執行複製或純文字輸出
     #[arg(short, long)]
     list: bool,
-
-    /// 在列表模式下同時計算並顯示 OTP (向 Agent 請求)
     #[arg(short, long)]
     otp: bool,
-
-    /// 安靜模式，不輸出任何 stderr 提示訊息
     #[arg(short, long)]
     quiet: bool,
-
-    /// 輸出到 stdout 而非剪貼簿 (Unix 風格 '-')
     #[arg(short = 's', long = "stdout")]
     stdout: bool,
 }
 
-// TODO: Phase 3 將此處改為真正的 IPC 通訊 (Unix Socket / Named Pipe)
-fn request_otp_placeholder(account: &Account) -> String {
-    use totp_rs::{Algorithm, TOTP, Secret};
-    
-    // totp-rs 的 Secret::Encoded 會自動處理 base32 解碼
-    let secret = Secret::Encoded(account.secret.clone()).to_bytes().expect("Failed to decode base32 secret");
+#[derive(Deserialize, Serialize)]
+struct MetadataFile {
+    accounts: Vec<Account>,
+    version: u32,
+}
 
-    let totp = TOTP::new(
-        Algorithm::SHA1,
-        account.digits as usize,
-        1,
-        30,
-        secret,
-    ).expect("Failed to initialize TOTP");
+fn generate_otp(acc: &Account) -> String {
+    use totp_rs::{Algorithm, TOTP, Secret};
+    let secret_str = acc.secret.trim().replace(" ", "");
+    let secret = Secret::Encoded(secret_str).to_bytes().expect("Failed to decode secret");
+    
+    // 使用 new_unchecked 繞過 RFC 對長度的強硬要求 (128 bits)
+    let totp = TOTP::new_unchecked(
+        Algorithm::SHA1, 
+        acc.digits as usize, 
+        1, 
+        30, 
+        secret
+    );
     
     totp.generate_current().unwrap()
 }
 
 fn main() {
-    // 1. 解析參數
     let mut args = Args::parse();
-    
-    // 處理特殊的 '-' 作為 stdout 標籤的模擬
     if args.patterns.contains(&"-".to_string()) {
         args.stdout = true;
         args.patterns.retain(|x| x != "-");
     }
 
-    // 2. 讀取資料
-    let vault_path = "data/private/vault.json";
-    if !Path::new(vault_path).exists() {
-        eprintln!("Error: vault.json not found. Run import script first.");
+    if std::path::Path::new("data/private").exists() && std::env::var("JKI_HOME").is_err() {
+        std::env::set_var("JKI_METADATA_PATH", "data/private/vault.metadata.json");
+        std::env::set_var("JKI_SECRETS_PATH", "data/private/vault.secrets.json.age");
+    }
+
+    let meta_path = JkiPath::metadata_path();
+    let sec_path = JkiPath::secrets_path();
+
+    if !meta_path.exists() {
+        if !args.quiet { eprintln!("Error: Metadata not found at {:?}", meta_path); }
         process::exit(100);
     }
-    
-    let content = fs::read_to_string(vault_path).expect("Failed to read vault");
-    let vault: serde_json::Value = serde_json::from_str(&content).expect("Failed to parse JSON");
-    let accounts: Vec<Account> = serde_json::from_value(vault["accounts"].clone()).unwrap();
 
-    // 3. 處理無參數情況
-    if args.patterns.is_empty() {
-        if !args.quiet { eprintln!("All Accounts:"); }
-        for (i, acc) in accounts.iter().enumerate() {
-            let otp_str = if args.otp {
-                format!("{} - ", request_otp_placeholder(acc))
-            } else {
-                "".to_string()
-            };
-            println!("{:2}) {}{}{}", i + 1, otp_str, acc.issuer.as_deref().map(|s| format!("[{}] ", s)).unwrap_or_default(), acc.name);
+    if !args.quiet { eprintln!("Unlocking vault..."); }
+    let master_key = acquire_master_key().unwrap_or_else(|e| {
+        eprintln!("Authentication failed: {}", e);
+        process::exit(101);
+    });
+
+    let meta_content = fs::read_to_string(&meta_path).expect("Failed to read metadata");
+    let meta_data: MetadataFile = serde_json::from_str(&meta_content).expect("Metadata parse error");
+
+    let sec_encrypted = fs::read(&sec_path).expect("Secrets file missing");
+    let sec_json = decrypt_with_master_key(&sec_encrypted, &master_key).expect("Decryption failed");
+    let secrets_map: HashMap<String, AccountSecret> = serde_json::from_slice(&sec_json).expect("Secrets parse error");
+
+    let mut integrated_accounts = Vec::new();
+    let mut missing_ids = Vec::new();
+
+    for mut acc in meta_data.accounts {
+        if let Some(s) = secrets_map.get(&acc.id) {
+            acc.secret = s.secret.clone();
+            acc.digits = s.digits;
+            acc.algorithm = s.algorithm.clone();
+            integrated_accounts.push(acc);
+        } else {
+            missing_ids.push(acc.name.clone());
         }
-        return;
     }
 
-    // 4. 交集模糊搜尋 (使用 jki_core 提供的邏輯)
+    if !missing_ids.is_empty() && !args.quiet {
+        eprintln!("Data Consistency Warning: Some accounts are missing secrets.");
+        for name in &missing_ids { eprintln!("  - {}", name); }
+        eprintln!("(Run with -q to suppress this warning)\n");
+    }
+
+    let accounts = integrated_accounts;
+
     let mut search_terms = args.patterns.clone();
     let mut index_selection: Option<usize> = None;
-    
     if search_terms.len() > 1 && search_terms.last().unwrap().chars().all(|c| c.is_ascii_digit()) {
         index_selection = search_terms.pop().and_then(|s| s.parse().ok());
     }
 
-    let results = search_accounts(&accounts, &search_terms);
+    let results = if search_terms.is_empty() { accounts.clone() } else { search_accounts(&accounts, &search_terms) };
 
     if results.is_empty() {
-        if !args.quiet { eprintln!("No matches found for patterns: {:?}", search_terms); }
+        if !args.quiet { eprintln!("No matches found."); }
         process::exit(1);
     }
 
-    // 5. 選取邏輯
     let target = if results.len() == 1 && !args.list {
         Some(&results[0])
     } else if let Some(idx) = index_selection {
-        if idx >= 1 && idx <= results.len() {
-            Some(&results[idx - 1])
-        } else {
-            if !args.quiet { eprintln!("Error: Index {} out of range (1-{}).", idx, results.len()); }
-            process::exit(2);
-        }
+        if idx >= 1 && idx <= results.len() { Some(&results[idx - 1]) }
+        else { process::exit(2); }
     } else {
-        // 歧義清單
-        if !args.quiet {
-            let title = if args.list { "Matches" } else { "Ambiguous results" };
-            eprintln!("{}:", title);
-        }
+        if !args.quiet { eprintln!("{}:", if args.list { "Matches" } else { "Ambiguous results" }); }
         for (i, acc) in results.iter().enumerate() {
-            let otp_str = if args.otp {
-                format!("{} - ", request_otp_placeholder(acc))
-            } else {
-                "".to_string()
-            };
+            let otp_str = if args.otp { format!("{} - ", generate_otp(acc)) } else { "".to_string() };
             println!("{:2}) {}{}{}", i + 1, otp_str, acc.issuer.as_deref().map(|s| format!("[{}] ", s)).unwrap_or_default(), acc.name);
         }
         process::exit(2);
     };
 
-    // 6. 執行結果
     if let Some(acc) = target {
-        let otp = request_otp_placeholder(acc);
-        let account_label = format!("{}{}", acc.issuer.as_deref().map(|s| format!("[{}] ", s)).unwrap_or_default(), acc.name);
+        let otp = generate_otp(acc);
+        let label = format!("{}{}", acc.issuer.as_deref().map(|s| format!("[{}] ", s)).unwrap_or_default(), acc.name);
         
-        if !args.quiet {
-            eprintln!("Selected: {}", account_label);
-        }
-
-        if args.stdout {
-            println!("{}", otp);
-        } else {
+        if !args.quiet { eprintln!("Selected: {}", label); }
+        if args.stdout { println!("{}", otp); }
+        else {
             use copypasta::{ClipboardContext, ClipboardProvider};
-            let mut ctx = ClipboardContext::new().expect("Failed to initialize clipboard");
-            ctx.set_contents(otp.clone()).expect("Failed to copy to clipboard");
-
+            let mut ctx = ClipboardContext::new().unwrap();
+            ctx.set_contents(otp).unwrap();
             if !args.quiet {
                 eprintln!("Copied OTP to clipboard.");
                 use notify_rust::Notification;
-                let _ = Notification::new()
-                    .summary("jki: OTP Copied")
-                    .body(&format!("Account: {}", account_label))
-                    .timeout(5000)
-                    .show();
+                let _ = Notification::new().summary("jki: OTP Copied").body(&format!("Account: {}", label)).show();
             }
         }
     }
