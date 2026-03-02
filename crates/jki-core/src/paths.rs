@@ -41,6 +41,12 @@ impl JkiPath {
             .unwrap_or_else(|_| Self::home_dir().join("master.key"))
     }
 
+    pub fn agent_socket_path() -> PathBuf {
+        env::var("JKI_AGENT_SOCKET_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| Self::home_dir().join("jki.sock"))
+    }
+
     pub fn check_secure_permissions(path: &PathBuf) -> Result<(), String> {
         if !path.exists() { return Err("File does not exist".to_string()); }
         #[cfg(unix)]

@@ -1,40 +1,46 @@
-# Mission: Just Keep Identity (jki) Unit Testing - Phase 2 (Hardened Paths & Integration)
+# Mission: Just Keep Identity (jki) Unit Testing - Phase 3 (Automation & Agency)
 
 ## 1. Context Update
-The project has transitioned to a split-data architecture:
-- `vault.metadata.json`: Plaintext metadata.
-- `vault.secrets.bin.age`: Encrypted secrets.
-- `paths.rs`: Refactored to handle absolute paths and `JKI_HOME` robustly.
+Phase 3 has introduced:
+- **Git Automation**: `jkim sync` for automated vault synchronization.
+- **Agent Service**: `jki-agent` as a background service with an IPC protocol (JSON over Local Sockets).
+- **TUI Management**: `jkim edit` for an interactive, searchable account list using `ratatui`.
+- **Integrated CLI**: `jki` now supports an `agent` subcommand for IPC interaction.
 
 ## 2. Objective
-Maintain > 90% logic coverage while covering the new path resolution and data integration logic.
+Extend coverage to the new automation logic and agent-based workflows, maintaining a workspace-wide coverage of >80%.
 
 ## 3. Key Logic to Test
-### jki-core (New Targets)
-- **Path Resolution**: 
-    - Test `home_dir()` with and without `JKI_HOME`.
-    - Test `metadata_path()` and `secrets_path()` env overrides.
-    - **Note**: Use `serial_test` crate if env var manipulation causes race conditions during parallel tests.
-- **Permission Checks**: Ensure `check_secure_permissions` correctly flags 0644 vs 0600 on Unix.
-- **Git Utilities**: Expand `git::check_status` tests to cover different repo states (dirty, branch names).
+### jki-core (Sync & IPC)
+- **Git Utilities**: 
+    - Test `git::add_all`, `git::commit`, `git::pull_rebase`, and `git::push` (mocking the git command if possible, or using temp repos).
+    - Ensure `GitRepoStatus` correctly identifies clean vs. modified states.
+- **Agent IPC**:
+    - Verify `agent::Request` and `agent::Response` serialization/deserialization.
 
-### jki (Integration Logic)
-- **Data Consistency**:
-    - Mock a scenario where Metadata contains an ID missing from Secrets.
-    - Test the default warning output vs. the `-q` quiet filtering behavior.
-- **Standalone Flow**: Test the full cycle of `acquire_master_key` -> `decrypt` -> `integrate` (mocking the interactive prompt if possible).
+### jki-agent (Service Logic)
+- **Request Handling**:
+    - Test `handle_client` logic (mocking the `LocalSocketStream` if possible, or using an actual socket in a temporary directory).
+    - Ensure `Ping` and `GetOTP` (placeholder) return the expected responses.
 
-### jkim (New Targets)
-- **Initialization**: Verify `jkim init` creates the correct directory structure and template files.
-- **Import Deduplication**: Ensure the "Read -> Decrypt -> Merge -> Encrypt" cycle in `import-winauth` is stable.
+### jkim (Automation & TUI)
+- **Sync Command**:
+    - Verify `handle_sync` performs the correct sequence of Git operations.
+    - Test edge cases where Git is not initialized or a remote is missing.
+- **TUI Filter Logic**:
+    - Extract the filtering logic from `handle_edit` to a testable function to ensure search/filtering works correctly without needing a full terminal environment.
+
+### jki (Subcommand Dispatch)
+- **Agent Client**:
+    - Test `handle_agent` by mocking the agent response (using a local socket in a temp directory).
 
 ## 4. Technical Requirements
-- **Mocking Filesystem**: Use `tempfile` extensively to avoid polluting the user's real `~/.config/jki`.
-- **Environment Isolation**: Ensure tests don't leak `JKI_HOME` to each other.
-- **Binary/Age Mocking**: Test the crypto functions with known test keys.
+- **Async Testing**: Since `jki-agent` and IPC might eventually move to async (Tokio), be prepared to use `#[tokio::test]`.
+- **Interprocess Simulation**: Use `JkiPath::agent_socket_path()` overrides to test IPC without affecting the user's running agent.
+- **Concurrency**: Continue using `serial_test` for any tests that modify environment variables or global states (like `JKI_HOME`).
 
 ## 5. Handover Note
-Refer to `missions/mission-unit-test-report.md` for current coverage baseline. Focus on the 0% coverage areas identified in the last report (especially `paths.rs` and `jkim`).
+Current coverage is healthy (~80%). Focus on covering the new `git` module in `jki-core` and the IPC dispatcher in `jki`.
 
 ---
-*Updated by Gemini-CLI for handover.*
+*Updated by Gemini-CLI for Phase 3 Unit Test Mission.*

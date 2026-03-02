@@ -15,6 +15,19 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+use ratatui::{
+    backend::CrosstermBackend,
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    layout::{Layout, Constraint, Direction},
+    style::{Style, Modifier, Color},
+    Terminal,
+};
+use crossterm::{
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+
 #[derive(Parser)]
 #[command(name = "jkim", version, about = "JK Suite Management Hub")]
 struct Cli {
@@ -28,6 +41,10 @@ enum Commands {
     Status,
     /// Initialize the JKI home directory and Git repository
     Init,
+    /// Sync changes to Git (add, commit, pull --rebase, push)
+    Sync,
+    /// Edit accounts in a TUI
+    Edit,
     /// Import accounts from a WinAuth decrypted text file
     ImportWinauth {
         /// Path to the decrypted WinAuth .txt file
@@ -62,7 +79,8 @@ fn handle_status() {
     if let Some(repo_status) = git::check_status(&config_dir) {
         println!("  - Git Repository  : OK ({:?})", config_dir);
         println!("  - Current Branch  : {}", repo_status.branch);
-        println!("  - Working Tree    : Clean");
+        println!("  - Working Tree    : {}", if repo_status.is_clean { "Clean" } else { "Modified" });
+        println!("  - Remote          : {}", if repo_status.has_remote { "Configured" } else { "None" });
     } else {
         println!("  - Git Repository  : Not initialized");
     }
@@ -70,6 +88,48 @@ fn handle_status() {
     println!("\n[Paths]");
     println!("  - Metadata Path   : {:?}", JkiPath::metadata_path());
     println!("  - Secrets Path    : {:?}", JkiPath::secrets_path());
+}
+
+fn handle_sync() {
+    let config_dir = JkiPath::home_dir();
+    println!("Syncing JKI Home at {:?}...", config_dir);
+
+    let status = match git::check_status(&config_dir) {
+        Some(s) => s,
+        None => {
+            eprintln!("Error: Not a git repository. Run 'jkim init' first.");
+            return;
+        }
+    };
+
+    println!("  - Stage changes...");
+    git::add_all(&config_dir).expect("Failed to add files");
+
+    println!("  - Commit...");
+    let now = chrono::Local::now();
+    let msg = format!("jki backup: {}", now.format("%Y-%m-%d %H:%M:%S"));
+    match git::commit(&config_dir, &msg) {
+        Ok(true) => println!("  - Committed: {}", msg),
+        Ok(false) => println!("  - Nothing to commit, working tree clean."),
+        Err(e) => eprintln!("  - Commit failed: {}", e),
+    }
+
+    if status.has_remote {
+        println!("  - Pull --rebase...");
+        if let Err(e) = git::pull_rebase(&config_dir) {
+            eprintln!("  - Pull failed: {}. Resolve conflicts manually.", e);
+            return;
+        }
+
+        println!("  - Push...");
+        if let Err(e) = git::push(&config_dir) {
+            eprintln!("  - Push failed: {}.", e);
+            return;
+        }
+        println!("Sync completed successfully!");
+    } else {
+        println!("No remote configured. Local backup complete.");
+    }
 }
 
 fn handle_init() {
@@ -177,12 +237,109 @@ fn handle_import_winauth(file: &PathBuf, overwrite: bool) {
     println!("  - New: {}, Updated: {}, Skipped: {}", new_count, updated_count, skip_count);
 }
 
+fn filter_accounts<'a>(accounts: &'a [Account], query: &str) -> Vec<&'a Account> {
+    accounts.iter()
+        .filter(|acc| {
+            let target = format!("{} {}", acc.issuer.as_deref().unwrap_or_default(), acc.name).to_lowercase();
+            target.contains(&query.to_lowercase())
+        })
+        .collect()
+}
+
+fn handle_edit() {
+    let meta_path = JkiPath::metadata_path();
+    if !meta_path.exists() {
+        eprintln!("Error: Metadata not found. Run 'jkim init' or import accounts first.");
+        return;
+    }
+
+    let content = fs::read_to_string(&meta_path).expect("Failed to read metadata");
+    let metadata: MetadataFile = serde_json::from_str(&content).expect("Failed to parse metadata");
+
+    // TUI Setup
+    enable_raw_mode().unwrap();
+    let mut stdout = std::io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture).unwrap();
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let mut search_query = String::new();
+    let mut list_state = ListState::default();
+    list_state.select(Some(0));
+
+    loop {
+        let filtered_accounts = filter_accounts(&metadata.accounts, &search_query);
+
+        terminal.draw(|f| {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(3), Constraint::Min(0)])
+                .split(f.size());
+
+            let search_box = Paragraph::new(search_query.as_str())
+                .block(Block::default().borders(Borders::ALL).title(" Search (Type to filter, ESC to exit) "));
+            f.render_widget(search_box, chunks[0]);
+
+            let items: Vec<ListItem> = filtered_accounts.iter()
+                .map(|acc| {
+                    let label = format!("{} - {}", acc.issuer.as_deref().unwrap_or("No Issuer"), acc.name);
+                    ListItem::new(label)
+                })
+                .collect();
+
+            let list = List::new(items)
+                .block(Block::default().borders(Borders::ALL).title(" Accounts "))
+                .highlight_style(Style::default().add_modifier(Modifier::BOLD).fg(Color::Yellow))
+                .highlight_symbol("> ");
+            f.render_stateful_widget(list, chunks[1], &mut list_state);
+        }).unwrap();
+
+        if event::poll(std::time::Duration::from_millis(100)).unwrap() {
+            if let Event::Key(key) = event::read().unwrap() {
+                match key.code {
+                    KeyCode::Esc => break,
+                    KeyCode::Char(c) => {
+                        search_query.push(c);
+                        list_state.select(Some(0));
+                    }
+                    KeyCode::Backspace => {
+                        search_query.pop();
+                        list_state.select(Some(0));
+                    }
+                    KeyCode::Up => {
+                        let i = match list_state.selected() {
+                            Some(i) => if i == 0 { filtered_accounts.len().saturating_sub(1) } else { i - 1 },
+                            None => 0,
+                        };
+                        list_state.select(Some(i));
+                    }
+                    KeyCode::Down => {
+                        let i = match list_state.selected() {
+                            Some(i) => if i >= filtered_accounts.len().saturating_sub(1) { 0 } else { i + 1 },
+                            None => 0,
+                        };
+                        list_state.select(Some(i));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // TUI Cleanup
+    disable_raw_mode().unwrap();
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture).unwrap();
+    terminal.show_cursor().unwrap();
+}
+
 fn main() {
     let cli = Cli::parse();
 
     match &cli.command {
         Commands::Status => handle_status(),
         Commands::Init => handle_init(),
+        Commands::Sync => handle_sync(),
+        Commands::Edit => handle_edit(),
         Commands::ImportWinauth { file, overwrite } => handle_import_winauth(file, *overwrite),
     }
 }
@@ -258,5 +415,50 @@ mod tests {
         assert_eq!(metadata.accounts.len(), 1);
         assert_eq!(metadata.accounts[0].name, "test@gmail.com");
         assert_eq!(metadata.accounts[0].issuer, Some("Google".to_string()));
+    }
+
+    #[test]
+    #[serial]
+    fn test_handle_sync() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("jki_home_sync");
+        env::set_var("JKI_HOME", &home);
+
+        // 1. Init
+        handle_init();
+        
+        // 2. Add some file
+        fs::write(home.join("test.txt"), "content").unwrap();
+        
+        // 3. Sync (should commit)
+        handle_sync();
+        
+        // 4. Verify commit
+        let output = Command::new("git")
+            .args(["-C", home.to_str().unwrap(), "log", "-n", "1"])
+            .output()
+            .unwrap();
+        let log = String::from_utf8_lossy(&output.stdout);
+        assert!(log.contains("jki backup:"));
+    }
+
+    #[test]
+    fn test_filter_accounts() {
+        use jki_core::AccountType;
+        let accounts = vec![
+            Account { id: "1".to_string(), name: "John".to_string(), issuer: Some("Google".to_string()), account_type: AccountType::Standard, secret: "".to_string(), digits: 6, algorithm: "".to_string() },
+            Account { id: "2".to_string(), name: "Jane".to_string(), issuer: Some("Facebook".to_string()), account_type: AccountType::Standard, secret: "".to_string(), digits: 6, algorithm: "".to_string() },
+        ];
+
+        let filtered = filter_accounts(&accounts, "goog");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, "1");
+
+        let filtered = filter_accounts(&accounts, "John");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, "1");
+
+        let filtered = filter_accounts(&accounts, "xyz");
+        assert_eq!(filtered.len(), 0);
     }
 }

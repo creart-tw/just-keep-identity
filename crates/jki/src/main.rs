@@ -1,5 +1,11 @@
-use clap::Parser;
-use jki_core::{search_accounts, paths::JkiPath, Account, AccountSecret, acquire_master_key, decrypt_with_master_key, integrate_accounts, generate_otp};
+use clap::{Parser, Subcommand};
+use jki_core::{
+    agent::{Request, Response},
+    generate_otp, integrate_accounts, paths::JkiPath,
+    Account, AccountSecret, acquire_master_key, decrypt_with_master_key, search_accounts,
+};
+use interprocess::local_socket::LocalSocketStream;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::fs;
 use std::process;
 use std::collections::HashMap;
@@ -7,16 +13,38 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
-struct Args {
-    patterns: Vec<String>,
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
+    /// Search patterns (used if no subcommand is provided)
+    pub patterns: Vec<String>,
+
     #[arg(short, long)]
-    list: bool,
+    pub list: bool,
     #[arg(short, long)]
-    otp: bool,
+    pub otp: bool,
     #[arg(short, long)]
-    quiet: bool,
+    pub quiet: bool,
     #[arg(short = 's', long = "stdout")]
-    stdout: bool,
+    pub stdout: bool,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum Commands {
+    /// Interact with the JKI background agent
+    Agent {
+        #[command(subcommand)]
+        cmd: AgentCommands,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum AgentCommands {
+    /// Check if the agent is alive
+    Ping,
+    /// Get an OTP via the agent
+    Get { id: String },
 }
 
 #[derive(Deserialize, Serialize)]
@@ -25,25 +53,77 @@ struct MetadataFile {
     version: u32,
 }
 
-fn run(mut args: Args) -> Result<(), i32> {
-    if args.patterns.contains(&"-".to_string()) {
-        args.stdout = true;
-        args.patterns.retain(|x| x != "-");
+fn handle_agent(cmd: &AgentCommands) {
+    let socket_path = JkiPath::agent_socket_path();
+    let name = socket_path.to_str().expect("Invalid socket path");
+
+    let stream = match LocalSocketStream::connect(name) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error connecting to agent: {}. Is jki-agent running?", e);
+            process::exit(1);
+        }
+    };
+    
+    if let Err(e) = handle_agent_with_stream(cmd, stream) {
+        eprintln!("{}", e);
+        process::exit(1);
+    }
+}
+
+fn handle_agent_with_stream<S: Read + Write>(cmd: &AgentCommands, mut stream: S) -> Result<(), String> {
+    let req = match cmd {
+        AgentCommands::Ping => Request::Ping,
+        AgentCommands::Get { id } => Request::GetOTP { account_id: id.clone() },
+    };
+
+    let req_json = serde_json::to_string(&req).expect("Failed to serialize request");
+    stream.write_all(format!("{}\n", req_json).as_bytes()).map_err(|e| e.to_string())?;
+    stream.flush().map_err(|e| e.to_string())?;
+
+    let mut line = String::new();
+    let mut reader = BufReader::new(stream);
+    reader.read_line(&mut line).map_err(|e| e.to_string())?;
+    let resp: Response = serde_json::from_str(&line).map_err(|e| format!("Failed to parse agent response: {}", e))?;
+
+    match resp {
+        Response::Pong => println!("Agent is alive (Pong)"),
+        Response::OTP(otp) => println!("{}", otp),
+        Response::Error(e) => return Err(format!("Agent error: {}", e)),
+    }
+    Ok(())
+}
+
+fn run(cli: Cli) -> Result<(), i32> {
+    if let Some(cmd) = &cli.command {
+        match cmd {
+            Commands::Agent { cmd } => {
+                handle_agent(cmd);
+                return Ok(());
+            }
+        }
+    }
+
+    let mut patterns = cli.patterns.clone();
+    let mut stdout_flag = cli.stdout;
+
+    if patterns.contains(&"-".to_string()) {
+        stdout_flag = true;
+        patterns.retain(|x| x != "-");
     }
 
     let meta_path = JkiPath::metadata_path();
     let sec_path = JkiPath::secrets_path();
 
-
     if !meta_path.exists() {
-        if !args.quiet { eprintln!("Error: Metadata not found at {:?}", meta_path); }
+        if !cli.quiet { eprintln!("Error: Metadata not found at {:?}", meta_path); }
         return Err(100);
     }
 
-    if !args.quiet { eprintln!("Unlocking vault..."); }
+    if !cli.quiet { eprintln!("Unlocking vault..."); }
     let master_key = acquire_master_key().unwrap_or_else(|e| {
         eprintln!("Authentication failed: {}", e);
-        process::exit(101); // acquire_master_key uses raw terminal mode, exit might be okay if it restores it.
+        process::exit(101);
     });
 
     let meta_content = fs::read_to_string(&meta_path).expect("Failed to read metadata");
@@ -55,7 +135,7 @@ fn run(mut args: Args) -> Result<(), i32> {
 
     let (integrated_accounts, missing_ids) = integrate_accounts(meta_data.accounts, &secrets_map);
 
-    if !missing_ids.is_empty() && !args.quiet {
+    if !missing_ids.is_empty() && !cli.quiet {
         eprintln!("Data Consistency Warning: Some accounts are missing secrets.");
         for name in &missing_ids { eprintln!("  - {}", name); }
         eprintln!("(Run with -q to suppress this warning)\n");
@@ -63,7 +143,7 @@ fn run(mut args: Args) -> Result<(), i32> {
 
     let accounts = integrated_accounts;
 
-    let mut search_terms = args.patterns.clone();
+    let mut search_terms = patterns;
     let mut index_selection: Option<usize> = None;
     if search_terms.len() > 1 && search_terms.last().unwrap().chars().all(|c| c.is_ascii_digit()) {
         index_selection = search_terms.pop().and_then(|s| s.parse().ok());
@@ -72,19 +152,19 @@ fn run(mut args: Args) -> Result<(), i32> {
     let results = if search_terms.is_empty() { accounts.clone() } else { search_accounts(&accounts, &search_terms) };
 
     if results.is_empty() {
-        if !args.quiet { eprintln!("No matches found."); }
+        if !cli.quiet { eprintln!("No matches found."); }
         return Err(1);
     }
 
-    let target = if results.len() == 1 && !args.list {
+    let target = if results.len() == 1 && !cli.list {
         Some(&results[0])
     } else if let Some(idx) = index_selection {
         if idx >= 1 && idx <= results.len() { Some(&results[idx - 1]) }
         else { return Err(2); }
     } else {
-        if !args.quiet { eprintln!("{}:", if args.list { "Matches" } else { "Ambiguous results" }); }
+        if !cli.quiet { eprintln!("{}:", if cli.list { "Matches" } else { "Ambiguous results" }); }
         for (i, acc) in results.iter().enumerate() {
-            let otp_str = if args.otp { format!("{} - ", generate_otp(acc).unwrap_or("ERROR".to_string())) } else { "".to_string() };
+            let otp_str = if cli.otp { format!("{} - ", generate_otp(acc).unwrap_or("ERROR".to_string())) } else { "".to_string() };
             println!("{:2}) {}{}{}", i + 1, otp_str, acc.issuer.as_deref().map(|s| format!("[{}] ", s)).unwrap_or_default(), acc.name);
         }
         return Err(2);
@@ -97,13 +177,13 @@ fn run(mut args: Args) -> Result<(), i32> {
         });
         let label = format!("{}{}", acc.issuer.as_deref().map(|s| format!("[{}] ", s)).unwrap_or_default(), acc.name);
         
-        if !args.quiet { eprintln!("Selected: {}", label); }
-        if args.stdout { println!("{}", otp); }
+        if !cli.quiet { eprintln!("Selected: {}", label); }
+        if stdout_flag { println!("{}", otp); }
         else {
             use copypasta::{ClipboardContext, ClipboardProvider};
-            let mut ctx = ClipboardContext::new().unwrap();
-            ctx.set_contents(otp).unwrap();
-            if !args.quiet {
+            let mut ctx = ClipboardContext::new().expect("Failed to open clipboard");
+            ctx.set_contents(otp).expect("Failed to set clipboard content");
+            if !cli.quiet {
                 eprintln!("Copied OTP to clipboard.");
                 use notify_rust::Notification;
                 let _ = Notification::new().summary("jki: OTP Copied").body(&format!("Account: {}", label)).show();
@@ -114,8 +194,8 @@ fn run(mut args: Args) -> Result<(), i32> {
 }
 
 fn main() {
-    let args = Args::parse();
-    if let Err(code) = run(args) {
+    let cli = Cli::parse();
+    if let Err(code) = run(cli) {
         process::exit(code);
     }
 }
@@ -132,17 +212,50 @@ mod tests {
 
     #[test]
     fn test_args_parsing() {
-        let args = Args::try_parse_from(["jki", "google", "gmail", "-l", "-o"]).unwrap();
-        assert_eq!(args.patterns, vec!["google", "gmail"]);
-        assert!(args.list);
-        assert!(args.otp);
-        assert!(!args.quiet);
+        let cli = Cli::try_parse_from(["jki", "google", "gmail", "-l", "-o"]).unwrap();
+        assert_eq!(cli.patterns, vec!["google", "gmail"]);
+        assert!(cli.list);
+        assert!(cli.otp);
+        assert!(!cli.quiet);
     }
 
     #[test]
     fn test_args_stdout_short() {
-        let args = Args::try_parse_from(["jki", "google", "-s"]).unwrap();
-        assert!(args.stdout);
+        let cli = Cli::try_parse_from(["jki", "google", "-s"]).unwrap();
+        assert!(cli.stdout);
+    }
+
+    #[test]
+    fn test_handle_agent_with_stream() {
+        use std::io::Cursor;
+        let cmd = AgentCommands::Ping;
+        let mut _output: Vec<u8> = Vec::new();
+        
+        struct MockStream {
+            input: Cursor<Vec<u8>>,
+            output: Vec<u8>,
+        }
+        impl std::io::Read for MockStream {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> { self.input.read(buf) }
+        }
+        impl std::io::Write for MockStream {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> { self.output.write(buf) }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+
+        let resp = Response::Pong;
+        let mut input = serde_json::to_vec(&resp).unwrap();
+        input.push(b'\n');
+
+        let mut stream = MockStream { input: Cursor::new(input), output: Vec::new() };
+        handle_agent_with_stream(&cmd, &mut stream).unwrap();
+
+        let req_str = String::from_utf8(stream.output).unwrap();
+        let req: Request = serde_json::from_str(&req_str).unwrap();
+        match req {
+            Request::Ping => {},
+            _ => panic!("Expected Ping request"),
+        }
     }
 
     #[test]
@@ -191,7 +304,8 @@ mod tests {
         fs::write(home.join("vault.secrets.bin.age"), encrypted).unwrap();
 
         // 4. Run jki
-        let args = Args {
+        let cli = Cli {
+            command: None,
             patterns: vec!["google".to_string()],
             list: false,
             otp: false,
@@ -199,7 +313,7 @@ mod tests {
             stdout: true,
         };
         
-        let result = run(args);
+        let result = run(cli);
         assert!(result.is_ok());
     }
 }

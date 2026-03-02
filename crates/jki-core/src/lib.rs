@@ -178,20 +178,109 @@ pub fn acquire_master_key() -> Result<SecretString, String> {
     result
 }
 
+pub mod agent {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Serialize, Deserialize, Debug)]
+    pub enum Request {
+        Ping,
+        GetOTP { account_id: String },
+    }
+
+    #[derive(Serialize, Deserialize, Debug)]
+    pub enum Response {
+        Pong,
+        OTP(String),
+        Error(String),
+    }
+}
+
 pub mod git {
     use std::process::Command;
     use std::path::Path;
-    pub struct GitRepoStatus { pub branch: String, pub is_clean: bool, pub has_remote: bool }
+
+    pub struct GitRepoStatus {
+        pub branch: String,
+        pub is_clean: bool,
+        pub has_remote: bool,
+    }
+
     pub fn check_status(repo_path: &Path) -> Option<GitRepoStatus> {
-        if !repo_path.join(".git").exists() { return None; }
-        let b = Command::new("git").args(["-C", repo_path.to_str()?, "rev-parse", "--abbrev-ref", "HEAD"]).output().ok()?;
-        let s = Command::new("git").args(["-C", repo_path.to_str()?, "status", "--porcelain"]).output().ok()?;
-        let r = Command::new("git").args(["-C", repo_path.to_str()?, "remote"]).output().ok()?;
+        if !repo_path.join(".git").exists() {
+            return None;
+        }
+        let b = Command::new("git")
+            .args(["-C", repo_path.to_str()?, "rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .ok()?;
+        let s = Command::new("git")
+            .args(["-C", repo_path.to_str()?, "status", "--porcelain"])
+            .output()
+            .ok()?;
+        let r = Command::new("git")
+            .args(["-C", repo_path.to_str()?, "remote"])
+            .output()
+            .ok()?;
         Some(GitRepoStatus {
             branch: String::from_utf8_lossy(&b.stdout).trim().to_string(),
             is_clean: s.stdout.is_empty(),
             has_remote: !r.stdout.is_empty(),
         })
+    }
+
+    pub fn add_all(repo_path: &Path) -> Result<(), String> {
+        let status = Command::new("git")
+            .args(["-C", repo_path.to_str().ok_or("Invalid path")?, "add", "."])
+            .status()
+            .map_err(|e| e.to_string())?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err("git add failed".to_string())
+        }
+    }
+
+    pub fn commit(repo_path: &Path, message: &str) -> Result<bool, String> {
+        let status = Command::new("git")
+            .args([
+                "-C",
+                repo_path.to_str().ok_or("Invalid path")?,
+                "commit",
+                "-m",
+                message,
+            ])
+            .status()
+            .map_err(|e| e.to_string())?;
+        Ok(status.success())
+    }
+
+    pub fn pull_rebase(repo_path: &Path) -> Result<(), String> {
+        let status = Command::new("git")
+            .args([
+                "-C",
+                repo_path.to_str().ok_or("Invalid path")?,
+                "pull",
+                "--rebase",
+            ])
+            .status()
+            .map_err(|e| e.to_string())?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err("git pull --rebase failed".to_string())
+        }
+    }
+
+    pub fn push(repo_path: &Path) -> Result<(), String> {
+        let status = Command::new("git")
+            .args(["-C", repo_path.to_str().ok_or("Invalid path")?, "push"])
+            .status()
+            .map_err(|e| e.to_string())?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err("git push failed".to_string())
+        }
     }
 }
 
@@ -293,6 +382,50 @@ mod tests {
         assert!(status.branch == "master" || status.branch == "main");
         assert!(status.is_clean);
         assert!(!status.has_remote);
+    }
+
+    #[test]
+    fn test_git_operations() {
+        use std::process::Command;
+        use tempfile::tempdir;
+        
+        let dir = tempdir().unwrap();
+        let repo_path = dir.path();
+        
+        Command::new("git").args(["init"]).current_dir(repo_path).output().unwrap();
+        Command::new("git").args(["config", "user.email", "you@example.com"]).current_dir(repo_path).output().unwrap();
+        Command::new("git").args(["config", "user.name", "Your Name"]).current_dir(repo_path).output().unwrap();
+        
+        // Test add_all
+        std::fs::write(repo_path.join("file1"), "content").unwrap();
+        git::add_all(repo_path).unwrap();
+        let s = git::check_status(repo_path).unwrap();
+        assert!(!s.is_clean);
+        
+        // Test commit
+        assert!(git::commit(repo_path, "feat: initial").unwrap());
+        let s = git::check_status(repo_path).unwrap();
+        assert!(s.is_clean);
+
+        // Test commit no changes
+        assert!(!git::commit(repo_path, "no change").unwrap());
+    }
+
+    #[test]
+    fn test_agent_ipc_serialization() {
+        let req = agent::Request::Ping;
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, "\"Ping\"");
+
+        let req = agent::Request::GetOTP { account_id: "123".to_string() };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("account_id"));
+        assert!(json.contains("123"));
+
+        let resp = agent::Response::OTP("123456".to_string());
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("OTP"));
+        assert!(json.contains("123456"));
     }
 
     #[test]
