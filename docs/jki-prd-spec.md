@@ -1,6 +1,6 @@
 # **Just Keep Identity (jki)：JK Suite 極速 MFA 數位金庫**
 
-## **產品需求 (PRD) 與技術規格 (Spec) 文件 - V24 (核心原則與重構版)**
+## **產品需求 (PRD) 與技術規格 (Spec) 文件 - V25 (產品化與可靠性版)**
 
 ### **第一章：品牌與核心原則 (Principles)**
 
@@ -20,9 +20,9 @@
 #### **1.4 金庫狀態與極速路徑 (Vault States & Speed Path)**
 *   **狀態靈活性**：JKI 支援「透明脫殼模式」。使用者可選擇將金庫解密為明文存放在磁碟上，以換取極致的查詢效能。
 *   **狀態定義**：
-    *   **Encrypted (標準)**：磁碟僅存 `.age` 加密檔，需密碼或 Agent。
+    *   **Encrypted (標準)**：磁碟僅存 `.age` 加密檔，需密碼、Keychain 或 Agent。
     *   **Plaintext (極速)**：磁碟存在 `vault.secrets.json` 明文檔。`jki` 應自動偵測並優先讀取此檔，繞過所有身份驗證與 IPC 流程，達成真正的零延遲。
-*   **狀態轉換 (Transition)**：轉換應具備「偏好感知 (Preference-Aware)」。`jkim decrypt` 預設路徑為「刪除加密來源」但「保留 Master Key」，以在確保資料權威性之餘，保留自動化封裝的能力。系統應透過具備預設值的詢問引導使用者，並支援全局預設 Flag。
+*   **狀態轉換 (Transition)**：轉換應具備「偏好感知 (Preference-Aware)」。`jkim decrypt` 預設路徑為「刪除加密來源」但「保留 Master Key」，以在確保資料權威性之餘，保留自動化封裝的能力。系統應透過具備預設值的詢問引導使用者，並支援全局預設 Flag (`-d, --default`)。
 
 ### ---
 
@@ -36,9 +36,10 @@
 #### **2.2 認證層級與優先順序**
 詳細指令與參數請參閱：[CLI 指令手冊 (jki-cli-spec.md)](jki-cli-spec.md)
 1.  **強制互動模式** (`-I`)。
-2.  **0600 靜態金鑰檔案** (`master.key`)。
-3.  **Agent Session** (記憶體快取)。
-4.  **自動回退互動式詢問** (Stdin)。
+2.  **系統金鑰鏈** (macOS Keychain / Windows Credential Manager)。
+3.  **0600 靜態金鑰檔案** (`master.key`)。
+4.  **Agent Session** (記憶體快取，需啟動 `jki-agent`)。
+5.  **自動回退互動式詢問** (Stdin)。
 
 ### ---
 
@@ -50,7 +51,7 @@
 
 #### **3.2 代理服務隔離 (jki-agent)**
 *   採用跨平台 Local Sockets 進行通訊。
-*   (Phase 4) 解鎖後的 Secrets 僅存在於 Agent 記憶體中，CLI 透過 IPC 向其請求 OTP 生成。
+*   解鎖後的 Secrets 僅存在於 Agent 記憶體中，CLI 透過 IPC 向其請求 OTP 生成（提升密鑰安全性）。
 
 ### ---
 
@@ -59,8 +60,8 @@
 1.  **Phase 1: Foundation**：WORKSPACE 建立 (Done)。
 2.  **Phase 2: Core Executor (jki)**：Rust 實作、資料拆分加密 (Done)。
 3.  **Phase 3: Management (jkim)**：Git 同步、編輯器模式、Master Key 工具集 (Done)。
-4.  **Phase 4: Agency & Key Caching (jki-agent)**：實作 Agent 快取機制與系統金鑰鏈串接。
-5.  **Phase 5: Productization & Reliability**：安裝腳本、程式碼清理與穩定性提升。
+4.  **Phase 4: Agency & Key Caching (jki-agent)**：實作 Agent 快取機制與搜尋優先序重構 (Done)。
+5.  **Phase 5: Productization & Reliability**：系統 Keychain 整合、匯出工具、安裝腳本與單元測試強化 (Done)。
 
 ---
 *詳細操作範例與輸出格式請參考 `jki-cli-spec.md`。*
