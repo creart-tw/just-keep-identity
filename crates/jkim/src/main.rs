@@ -79,6 +79,9 @@ enum Commands {
     /// Manage the Master Key
     #[command(subcommand)]
     MasterKey(MasterKeyCommands),
+    /// Manage the system keychain
+    #[command(subcommand)]
+    Keychain(KeychainCommands),
     /// Import accounts from a WinAuth decrypted text file
     ImportWinauth {
         /// Path to the decrypted WinAuth .txt file
@@ -105,8 +108,11 @@ enum MasterKeyCommands {
         #[arg(short, long)]
         force: bool,
         /// Store the key in the system keychain (default: true)
-        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        #[arg(long, default_value_t = true, action = clap::ArgAction::SetTrue)]
         keychain: bool,
+        /// Do not store the key in the system keychain
+        #[arg(long, overrides_with = "keychain", action = clap::ArgAction::SetFalse)]
+        no_keychain: bool,
     },
     /// Delete the master key from disk
     Remove {
@@ -123,6 +129,18 @@ enum MasterKeyCommands {
         #[arg(long)]
         commit: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum KeychainCommands {
+    /// Store a master key directly into the keychain (prompts for input in CLI)
+    Set,
+    /// Remove the master key from the keychain
+    Remove,
+    /// Copy the local master.key file INTO the system keychain
+    Push,
+    /// Copy the master key FROM the system keychain to the local master.key file
+    Pull,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -253,7 +271,7 @@ fn handle_master_key(cmd: &MasterKeyCommands, auth: AuthSource, default_flag: bo
     let sec_path = JkiPath::secrets_path();
 
     match cmd {
-        MasterKeyCommands::Set { force, keychain } => {
+        MasterKeyCommands::Set { force, keychain, no_keychain: _ } => {
             if !*force && key_path.exists() {
                 if !default_flag && !interactor.confirm(&format!("Warning: master.key already exists at {:?}", key_path), false) { return; }
             }
@@ -379,6 +397,65 @@ fn handle_master_key(cmd: &MasterKeyCommands, auth: AuthSource, default_flag: bo
                 println!("Changes committed to Git.");
             } else {
                 println!("Note: You may want to run 'jkim sync' to backup your new encrypted vault.");
+            }
+        }
+    }
+}
+
+fn handle_keychain(cmd: &KeychainCommands, interactor: &dyn Interactor) {
+    let key_path = JkiPath::master_key_path();
+
+    match cmd {
+        KeychainCommands::Set => {
+            let p1 = interactor.prompt_password("Enter Master Key to store in keychain").expect("Input failed");
+            let p2 = interactor.prompt_password("Confirm Master Key").expect("Input failed");
+            
+            use secrecy::ExposeSecret;
+            if p1.expose_secret() != p2.expose_secret() {
+                eprintln!("Error: Passwords do not match.");
+                return;
+            }
+
+            if let Err(e) = KeyringStore.set_secret("jki", "master_key", p1.expose_secret()) {
+                eprintln!("Error: Failed to save to system keychain: {}", e);
+            } else {
+                println!("Master Key saved to system keychain successfully.");
+            }
+        }
+        KeychainCommands::Remove => {
+            if let Err(e) = KeyringStore.delete_secret("jki", "master_key") {
+                eprintln!("Error: Failed to remove from system keychain: {}", e);
+            } else {
+                println!("Master Key removed from system keychain successfully.");
+            }
+        }
+        KeychainCommands::Push => {
+            if !key_path.exists() {
+                eprintln!("Error: master.key file not found at {:?}.", key_path);
+                return;
+            }
+            let content = fs::read_to_string(&key_path).expect("Failed to read master.key");
+            if let Err(e) = KeyringStore.set_secret("jki", "master_key", content.trim()) {
+                eprintln!("Error: Failed to push to system keychain: {}", e);
+            } else {
+                println!("Master Key pushed from {:?} to system keychain successfully.", key_path);
+            }
+        }
+        KeychainCommands::Pull => {
+            match KeyringStore.get_secret("jki", "master_key") {
+                Ok(secret) => {
+                    use secrecy::ExposeSecret;
+                    fs::write(&key_path, secret.expose_secret()).expect("Failed to write master.key");
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).unwrap();
+                    }
+                    println!("Master Key pulled from system keychain to {:?} successfully.", key_path);
+                }
+                Err(e) => {
+                    eprintln!("Error: Failed to pull from system keychain: {}", e);
+                }
             }
         }
     }
@@ -824,6 +901,7 @@ fn main() {
         Commands::Decrypt { force, keep, remove_key } => handle_decrypt(*force, *keep, *remove_key, cli.default, auth, &interactor),
         Commands::Encrypt { force } => handle_encrypt(*force, cli.default, auth, &interactor),
         Commands::MasterKey(m) => handle_master_key(m, auth, cli.default, &interactor),
+        Commands::Keychain(k) => handle_keychain(k, &interactor),
         Commands::ImportWinauth { file, overwrite, force_new_vault } =>
             handle_import_winauth(file, *overwrite, auth, cli.default, &interactor, *force_new_vault),
         Commands::Export { output } => handle_export(output, auth, &interactor),

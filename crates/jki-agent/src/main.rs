@@ -17,7 +17,6 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 mod tray;
-mod biometric;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "jki-agent - Just Keep Identity Agent", long_about = None)]
@@ -60,6 +59,8 @@ impl State {
         let sec_path = JkiPath::secrets_path();
         let decrypted_path = JkiPath::decrypted_secrets_path();
 
+        // If Bio or Agent mode is on, we prefer .age, but FALLBACK to .json if .age is missing.
+        // We do NOT refuse plaintext here anymore.
         let res = if sec_path.exists() && self.auth != AuthSource::Plaintext {
             let sec_encrypted = std::fs::read(&sec_path).map_err(|e| e.to_string())?;
             let sec_json = decrypt_with_master_key(&sec_encrypted, &master_key)?;
@@ -68,20 +69,8 @@ impl State {
             self.secrets = Some(secrets_map);
             self.last_unlocked = Some(Instant::now());
             Ok("Encrypted Vault".to_string())
-        } else if self.auth == AuthSource::Plaintext {
-            if decrypted_path.exists() {
-                let sec_json = std::fs::read(&decrypted_path).map_err(|e| e.to_string())?;
-                let secrets_map: HashMap<String, AccountSecret> = serde_json::from_slice(&sec_json).map_err(|e| e.to_string())?;
-
-                self.secrets = Some(secrets_map);
-                self.last_unlocked = Some(Instant::now());
-                Ok("Plaintext Vault".to_string())
-            } else {
-                Err("Plaintext mode enabled: Plaintext vault missing.".to_string())
-            }
-        } else if self.auth != AuthSource::Auto {
-            Err(format!("Auth mode {:?} enabled: Encrypted vault missing. Refusing to load plaintext.", self.auth))
         } else if decrypted_path.exists() {
+            // This covers Plaintext mode, Auto fallback, and now Biometric fallback
             let sec_json = std::fs::read(&decrypted_path).map_err(|e| e.to_string())?;
             let secrets_map: HashMap<String, AccountSecret> = serde_json::from_slice(&sec_json).map_err(|e| e.to_string())?;
 
@@ -101,16 +90,34 @@ impl State {
     fn unlock_with_biometric(&mut self) -> Result<String, String> {
         use jki_core::keychain::{KeyringStore, SecretStore};
         
-        // 1. Explicit OS verification
-        biometric::verify_biometric("Unlock JKI Vault")?;
-        
-        // 2. Retrieve master key from keychain
+        // 1. Retrieve master key from keychain (triggers system prompt)
         let store = KeyringStore;
         let master_key = store.get_secret("jki", "master_key")
             .map_err(|e| format!("Failed to retrieve master key from keychain: {}", e))?;
             
-        // 3. Perform standard unlock
-        self.unlock(master_key)
+        // 2. Directly perform unlock logic to avoid calling self.unlock() 
+        // which might have its own fallback logic/prompts.
+        let sec_path = JkiPath::secrets_path();
+        let decrypted_path = JkiPath::decrypted_secrets_path();
+
+        let (secrets_map, source) = if sec_path.exists() {
+            let sec_encrypted = std::fs::read(&sec_path).map_err(|e| e.to_string())?;
+            let sec_json = decrypt_with_master_key(&sec_encrypted, &master_key)?;
+            let map: HashMap<String, AccountSecret> = serde_json::from_slice(&sec_json).map_err(|e| e.to_string())?;
+            (map, "Encrypted Vault")
+        } else if decrypted_path.exists() {
+            let sec_json = std::fs::read(&decrypted_path).map_err(|e| e.to_string())?;
+            let map: HashMap<String, AccountSecret> = serde_json::from_slice(&sec_json).map_err(|e| e.to_string())?;
+            (map, "Plaintext Vault")
+        } else {
+            return Err("Secrets file missing (neither .age nor .json found)".to_string());
+        };
+
+        self.secrets = Some(secrets_map);
+        self.master_key = Some(master_key);
+        self.last_unlocked = Some(Instant::now());
+        
+        Ok(source.to_string())
     }
 
     fn get_otp(&mut self, account_id: &str) -> Result<String, String> {
@@ -156,12 +163,16 @@ fn main() -> io::Result<()> {
     let socket_path = JkiPath::agent_socket_path();
     let name = socket_path.to_str().unwrap().to_string();
 
-    // Pre-flight check
-    if auth != AuthSource::Auto && auth != AuthSource::Plaintext && !JkiPath::secrets_path().exists() {
-        eprintln!("CRITICAL: Auth mode {:?} enabled but encrypted vault (.age) is missing. Exit.", auth);
+    // Pre-flight check: Ensure at least one vault exists
+    let has_encrypted = JkiPath::secrets_path().exists();
+    let has_plaintext = JkiPath::decrypted_secrets_path().exists();
+
+    if !has_encrypted && !has_plaintext {
+        eprintln!("CRITICAL: No vault file found (.age or .json). Exit.");
         std::process::exit(1);
     }
-    if auth == AuthSource::Plaintext && !JkiPath::decrypted_secrets_path().exists() {
+
+    if auth == AuthSource::Plaintext && !has_plaintext {
         eprintln!("CRITICAL: Plaintext mode enabled but vault.secrets.json is missing. Exit.");
         std::process::exit(1);
     }
@@ -180,7 +191,10 @@ fn main() -> io::Result<()> {
         let mut s = state.lock().unwrap();
         match s.unlock_with_biometric() {
             Ok(src) => println!("Biometric unlock successful: {}", src),
-            Err(e) => eprintln!("Biometric unlock failed: {}", e),
+            Err(e) => {
+                eprintln!("CRITICAL: Biometric unlock failed: {}. Exit.", e);
+                std::process::exit(1);
+            }
         }
     }
 

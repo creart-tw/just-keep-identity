@@ -13,8 +13,49 @@ pub struct KeyringStore;
 
 impl SecretStore for KeyringStore {
     fn set_secret(&self, service: &str, user: &str, secret: &str) -> Result<(), String> {
-        let entry = Entry::new(service, user).map_err(|e| e.to_string())?;
-        entry.set_password(secret).map_err(|e| e.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            // On macOS, we use the 'security' command directly to handle ACL (Access Control List).
+            // This allows us to authorize both jkim and jki-agent simultaneously at creation time,
+            // preventing the annoying "App B wants to access App A's item" prompt.
+            use std::process::Command;
+
+            let current_exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let mut agent_exe = current_exe.clone();
+            agent_exe.pop();
+            agent_exe.push("jki-agent");
+
+            // 1. Delete existing item to ensure we start with a clean ACL
+            let _ = Command::new("security")
+                .arg("delete-generic-password")
+                .arg("-a").arg(user)
+                .arg("-s").arg(service)
+                .output();
+
+            // 2. Add new item with explicit trusted applications (-T)
+            // -T allows the specified applications to access the item without prompt.
+            let output = Command::new("security")
+                .arg("add-generic-password")
+                .arg("-a").arg(user)
+                .arg("-s").arg(service)
+                .arg("-w").arg(secret)
+                .arg("-T").arg(current_exe.to_string_lossy().to_string())
+                .arg("-T").arg(agent_exe.to_string_lossy().to_string())
+                .output()
+                .map_err(|e| e.to_string())?;
+
+            if !output.status.success() {
+                let err = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("Security command failed: {}", err));
+            }
+            Ok(())
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let entry = Entry::new(service, user).map_err(|e| e.to_string())?;
+            entry.set_password(secret).map_err(|e| e.to_string())
+        }
     }
 
     fn get_secret(&self, service: &str, user: &str) -> Result<SecretString, String> {
