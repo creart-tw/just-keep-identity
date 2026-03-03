@@ -22,7 +22,7 @@
 *   **狀態定義**：
     *   **Encrypted (標準)**：磁碟僅存 `.age` 加密檔，需密碼或 Agent。
     *   **Plaintext (極速)**：磁碟存在 `vault.secrets.json` 明文檔。`jki` 應自動偵測並優先讀取此檔，繞過所有身份驗證與 IPC 流程，達成真正的零延遲。
-*   **狀態轉換 (Transition)**：提供 `jkim decrypt` 與 `jkim encrypt` 進行手動狀態切換。管理工具 (jkim) 在混合狀態下應具備自動同步/封裝的預設行為。
+*   **狀態轉換 (Transition)**：轉換應具備「偏好感知 (Preference-Aware)」。`jkim decrypt` 預設路徑為「刪除加密來源」但「保留 Master Key」，以在確保資料權威性之餘，保留自動化封裝的能力。系統應透過具備預設值的詢問引導使用者，並支援全局預設 Flag。
 
 ### ---
 

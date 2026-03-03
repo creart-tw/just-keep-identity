@@ -134,7 +134,7 @@ pub fn search_accounts(accounts: &[Account], patterns: &[String]) -> Vec<Account
 
 pub trait Interactor {
     fn prompt_password(&self, prompt: &str) -> Result<SecretString, String>;
-    fn confirm(&self, prompt: &str) -> bool;
+    fn confirm(&self, prompt: &str, default: bool) -> bool;
 }
 
 pub struct TerminalInteractor;
@@ -185,13 +185,18 @@ impl Interactor for TerminalInteractor {
         result
     }
 
-    fn confirm(&self, prompt: &str) -> bool {
+    fn confirm(&self, prompt: &str, default: bool) -> bool {
         use std::io::{self, Write};
-        print!("{} [y/N]: ", prompt);
+        let options = if default { "[Y/n]" } else { "[y/N]" };
+        print!("{} {}: ", prompt, options);
         io::stdout().flush().unwrap();
         let mut input = String::new();
         io::stdin().read_line(&mut input).unwrap();
-        input.trim().to_lowercase() == "y"
+        let input = input.trim().to_lowercase();
+        if input.is_empty() {
+            return default;
+        }
+        input == "y"
     }
 }
 
@@ -208,9 +213,9 @@ impl Interactor for MockInteractor {
         Ok(SecretString::from(self.passwords.borrow_mut().remove(0)))
     }
 
-    fn confirm(&self, _prompt: &str) -> bool {
+    fn confirm(&self, _prompt: &str, default: bool) -> bool {
         if self.confirms.borrow().is_empty() {
-            return false;
+            return default;
         }
         self.confirms.borrow_mut().remove(0)
     }

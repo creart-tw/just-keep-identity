@@ -29,6 +29,10 @@ struct Cli {
     /// Force interactive master key input, ignoring master.key file
     #[arg(short = 'I', long, global = true)]
     pub interactive: bool,
+
+    /// Apply recommended default decisions for all prompts
+    #[arg(short, long, global = true)]
+    pub default: bool,
 }
 
 #[derive(Subcommand)]
@@ -50,6 +54,12 @@ enum Commands {
         /// Force overwrite of existing vault.secrets.json
         #[arg(short, long)]
         force: bool,
+        /// Keep the encrypted source file (.age) after decryption
+        #[arg(short, long)]
+        keep: bool,
+        /// Remove the master.key file after decryption
+        #[arg(long)]
+        remove_key: bool,
     },
     /// Encrypt the plaintext JSON vault back to .age
     Encrypt {
@@ -70,9 +80,6 @@ enum Commands {
         /// If decryption fails, discard existing vault and create a new one
         #[arg(long)]
         force_new_vault: bool,
-        /// Skip confirmation prompts
-        #[arg(short, long)]
-        yes: bool,
     },
 }
 
@@ -133,19 +140,19 @@ fn handle_status() {
     println!("  - Secrets Path    : {:?}", JkiPath::secrets_path());
 }
 
-fn handle_master_key(cmd: &MasterKeyCommands, force_interactive: bool, interactor: &dyn Interactor) {
+fn handle_master_key(cmd: &MasterKeyCommands, force_interactive: bool, default_flag: bool, interactor: &dyn Interactor) {
     let key_path = JkiPath::master_key_path();
     let sec_path = JkiPath::secrets_path();
 
     match cmd {
         MasterKeyCommands::Set { force } => {
             if !*force && key_path.exists() {
-                if !interactor.confirm(&format!("Warning: master.key already exists at {:?}", key_path)) { return; }
+                if !default_flag && !interactor.confirm(&format!("Warning: master.key already exists at {:?}", key_path), false) { return; }
             }
             if !*force && sec_path.exists() {
                 println!("CRITICAL WARNING: vault.secrets.bin.age already exists.");
                 println!("If the new key doesn't match the one used to encrypt it, you will LOSE ACCESS to your secrets.");
-                if !interactor.confirm("Proceed anyway?") { return; }
+                if !default_flag && !interactor.confirm("Proceed anyway?", false) { return; }
             }
 
             let p1 = interactor.prompt_password("Enter new Master Key").expect("Input failed");
@@ -169,7 +176,7 @@ fn handle_master_key(cmd: &MasterKeyCommands, force_interactive: bool, interacto
                 return;
             }
             if !*force {
-                if !interactor.confirm("Warning: Removing master.key means you will need to input it manually for every 'jki' command. Are you sure?") { return; }
+                if !default_flag && !interactor.confirm("Warning: Removing master.key means you will need to input it manually for every 'jki' command. Are you sure?", false) { return; }
             }
             fs::remove_file(&key_path).expect("Failed to remove key");
             println!("Master Key removed.");
@@ -346,9 +353,10 @@ fn handle_edit() {
     }
 }
 
-fn handle_decrypt(force: bool, force_interactive: bool, interactor: &dyn Interactor) {
+fn handle_decrypt(force: bool, keep: bool, remove_key: bool, default_flag: bool, force_interactive: bool, interactor: &dyn Interactor) {
     let sec_path = JkiPath::secrets_path();
     let dec_path = JkiPath::decrypted_secrets_path();
+    let key_path = JkiPath::master_key_path();
 
     if !sec_path.exists() {
         eprintln!("Error: Encrypted vault not found at {:?}", sec_path);
@@ -356,7 +364,7 @@ fn handle_decrypt(force: bool, force_interactive: bool, interactor: &dyn Interac
     }
 
     if dec_path.exists() && !force {
-        if !interactor.confirm(&format!("Warning: Plaintext vault already exists at {:?}. Overwrite?", dec_path)) {
+        if !default_flag && !interactor.confirm(&format!("Warning: Plaintext vault already exists at {:?}. Overwrite?", dec_path), false) {
             return;
         }
     }
@@ -373,9 +381,30 @@ fn handle_decrypt(force: bool, force_interactive: bool, interactor: &dyn Interac
     }
     println!("Vault decrypted to plaintext at {:?}", dec_path);
     println!("Note: jki will now use this for zero-latency lookups.");
+
+    // 1. Handle .age deletion (Recommended: Yes)
+    if !keep {
+        if default_flag || interactor.confirm("Delete encrypted source (.age)?", true) {
+            fs::remove_file(&sec_path).expect("Failed to delete encrypted source");
+            println!("Encrypted source deleted.");
+        }
+    }
+
+    // 2. Handle master.key deletion (Recommended: No)
+    if remove_key {
+        if key_path.exists() {
+            fs::remove_file(&key_path).expect("Failed to delete master.key");
+            println!("Master Key file removed.");
+        }
+    } else if key_path.exists() && !default_flag {
+        if interactor.confirm("Delete master key file?", false) {
+            fs::remove_file(&key_path).expect("Failed to delete master.key");
+            println!("Master Key file removed.");
+        }
+    }
 }
 
-fn handle_encrypt(force: bool, force_interactive: bool, interactor: &dyn Interactor) {
+fn handle_encrypt(force: bool, default_flag: bool, force_interactive: bool, interactor: &dyn Interactor) {
     let sec_path = JkiPath::secrets_path();
     let dec_path = JkiPath::decrypted_secrets_path();
 
@@ -385,7 +414,7 @@ fn handle_encrypt(force: bool, force_interactive: bool, interactor: &dyn Interac
     }
 
     if sec_path.exists() && !force {
-        if !interactor.confirm(&format!("Warning: Encrypted vault already exists at {:?}. Overwrite?", sec_path)) {
+        if !default_flag && !interactor.confirm(&format!("Warning: Encrypted vault already exists at {:?}. Overwrite?", sec_path), false) {
             return;
         }
     }
@@ -466,7 +495,7 @@ fn handle_init(force: bool) {
     println!("  - Run 'jkim import-winauth <file>' to add accounts.");
 }
 
-fn handle_import_winauth(file: &PathBuf, overwrite: bool, force_interactive: bool, interactor: &dyn Interactor, force_new_vault: bool, yes: bool) {
+fn handle_import_winauth(file: &PathBuf, overwrite: bool, force_interactive: bool, default_flag: bool, interactor: &dyn Interactor, force_new_vault: bool) {
     if !file.exists() { eprintln!("Error: File not found."); return; }
 
     let meta_path = JkiPath::metadata_path();
@@ -560,8 +589,8 @@ fn handle_import_winauth(file: &PathBuf, overwrite: bool, force_interactive: boo
     // Hybrid state logic: if master_key exists, always encrypt to .age
     if has_master_key {
         let mut should_seal = true;
-        if !yes && is_plaintext {
-            should_seal = interactor.confirm("Master Key exists. Encrypt and delete plaintext vault?");
+        if !default_flag && is_plaintext {
+            should_seal = interactor.confirm("Master Key exists. Encrypt and delete plaintext vault?", true);
         }
         
         if should_seal {
@@ -598,11 +627,11 @@ fn main() {
         Commands::Init { force } => handle_init(*force),
         Commands::Sync => handle_sync(),
         Commands::Edit => handle_edit(),
-        Commands::Decrypt { force } => handle_decrypt(*force, cli.interactive, &interactor),
-        Commands::Encrypt { force } => handle_encrypt(*force, cli.interactive, &interactor),
-        Commands::MasterKey(m) => handle_master_key(m, cli.interactive, &interactor),
-        Commands::ImportWinauth { file, overwrite, force_new_vault, yes } => 
-            handle_import_winauth(file, *overwrite, cli.interactive, &interactor, *force_new_vault, *yes),
+        Commands::Decrypt { force, keep, remove_key } => handle_decrypt(*force, *keep, *remove_key, cli.default, cli.interactive, &interactor),
+        Commands::Encrypt { force } => handle_encrypt(*force, cli.default, cli.interactive, &interactor),
+        Commands::MasterKey(m) => handle_master_key(m, cli.interactive, cli.default, &interactor),
+        Commands::ImportWinauth { file, overwrite, force_new_vault } => 
+            handle_import_winauth(file, *overwrite, cli.interactive, cli.default, &interactor, *force_new_vault),
     }
 }
 
@@ -628,7 +657,7 @@ mod tests {
             passwords: RefCell::new(vec!["newpass".to_string(), "newpass".to_string()]),
             confirms: RefCell::new(vec![]),
         };
-        handle_master_key(&cmd, false, &interactor);
+        handle_master_key(&cmd, false, false, &interactor);
 
         assert!(home.join("master.key").exists());
         assert_eq!(fs::read_to_string(home.join("master.key")).unwrap(), "newpass");
@@ -662,7 +691,7 @@ mod tests {
             passwords: RefCell::new(vec!["newpass".to_string(), "newpass".to_string()]),
             confirms: RefCell::new(vec![]),
         };
-        handle_master_key(&cmd, false, &interactor);
+        handle_master_key(&cmd, false, false, &interactor);
 
         // 3. Verify
         assert_eq!(fs::read_to_string(home.join("master.key")).unwrap(), "newpass");
@@ -687,7 +716,7 @@ mod tests {
             passwords: RefCell::new(vec![]),
             confirms: RefCell::new(vec![]),
         };
-        handle_master_key(&cmd, false, &interactor);
+        handle_master_key(&cmd, false, false, &interactor);
 
         assert!(!home.join("master.key").exists());
     }
@@ -747,7 +776,7 @@ mod tests {
             passwords: RefCell::new(vec![]),
             confirms: RefCell::new(vec![]),
         };
-        handle_import_winauth(&import_file, false, false, &interactor, false, true);
+        handle_import_winauth(&import_file, false, false, true, &interactor, false);
 
         // 4. Verify files
         let meta_path = home.join("vault.metadata.json");
@@ -809,16 +838,18 @@ mod tests {
         fs::write(&sec_path, encrypted).unwrap();
 
         let interactor = MockInteractor {
-            passwords: RefCell::new(vec![]),
-            confirms: RefCell::new(vec![true, true]),
+            passwords: RefCell::new(vec!["testpass".to_string()]),
+            confirms: RefCell::new(vec![true, false]),
         };
         
-        // 1. Decrypt
-        handle_decrypt(false, false, &interactor);
+        // 1. Decrypt: Delete .age (true), Keep master.key (false)
+        handle_decrypt(false, false, false, false, false, &interactor);
         assert!(dec_path.exists());
+        assert!(!sec_path.exists());
+        assert!(key_path.exists());
 
-        // 2. Encrypt
-        handle_encrypt(false, false, &interactor);
+        // 2. Encrypt (uses master.key, no prompt needed)
+        handle_encrypt(false, false, false, &interactor);
         assert!(!dec_path.exists());
         assert!(sec_path.exists());
     }
