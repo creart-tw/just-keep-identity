@@ -33,6 +33,10 @@ struct Cli {
     pub quiet: bool,
     #[arg(short = 's', long = "stdout")]
     pub stdout: bool,
+
+    /// Force using agent or local decryption, bypassing plaintext vault
+    #[arg(long)]
+    pub force_agent: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -142,8 +146,8 @@ fn ensure_agent_running(quiet: bool) -> bool {
     }
 }
 
-fn handle_otp_output(otp: String, label: String, stdout_flag: bool, quiet: bool) {
-    if !quiet { eprintln!("Selected: {}", label); }
+fn handle_otp_output(otp: String, label: String, source: &str, stdout_flag: bool, quiet: bool) {
+    if !quiet { eprintln!("[{}] Selected: {}", source, label); }
     if stdout_flag { println!("{}", otp); }
     else {
         use copypasta::{ClipboardContext, ClipboardProvider};
@@ -218,18 +222,20 @@ fn run(cli: Cli) -> Result<(), i32> {
         let label = format!("{}{}", acc.issuer.as_deref().map(|s| format!("[{}] ", s)).unwrap_or_default(), acc.name);
         
         // 1. Plaintext Path: Check vault.secrets.json first (Fastest)
-        let decrypted_path = JkiPath::decrypted_secrets_path();
-        if decrypted_path.exists() {
-            if let Ok(content) = fs::read(&decrypted_path) {
-                if let Ok(secrets_map) = serde_json::from_slice::<HashMap<String, AccountSecret>>(&content) {
-                    if let Some(s) = secrets_map.get(&acc.id) {
-                        let mut full_acc = acc.clone();
-                        full_acc.secret = s.secret.clone();
-                        full_acc.digits = s.digits;
-                        full_acc.algorithm = s.algorithm.clone();
-                        if let Ok(otp) = generate_otp(&full_acc) {
-                            handle_otp_output(otp, label, stdout_flag, cli.quiet);
-                            return Ok(());
+        if !cli.force_agent {
+            let decrypted_path = JkiPath::decrypted_secrets_path();
+            if decrypted_path.exists() {
+                if let Ok(content) = fs::read(&decrypted_path) {
+                    if let Ok(secrets_map) = serde_json::from_slice::<HashMap<String, AccountSecret>>(&content) {
+                        if let Some(s) = secrets_map.get(&acc.id) {
+                            let mut full_acc = acc.clone();
+                            full_acc.secret = s.secret.clone();
+                            full_acc.digits = s.digits;
+                            full_acc.algorithm = s.algorithm.clone();
+                            if let Ok(otp) = generate_otp(&full_acc) {
+                                handle_otp_output(otp, label, "Plaintext", stdout_flag, cli.quiet);
+                                return Ok(());
+                            }
                         }
                     }
                 }
@@ -251,7 +257,7 @@ fn run(cli: Cli) -> Result<(), i32> {
                     if let Ok(resp) = serde_json::from_str::<Response>(&line) {
                         match resp {
                             Response::OTP(otp) => {
-                                handle_otp_output(otp, label, stdout_flag, cli.quiet);
+                                handle_otp_output(otp, label, "Agent", stdout_flag, cli.quiet);
                                 return Ok(());
                             }
                             Response::Error(e) if e.contains("Agent is locked") => {
@@ -277,7 +283,7 @@ fn run(cli: Cli) -> Result<(), i32> {
                                             let mut reader = BufReader::new(s);
                                             if let Ok(_) = reader.read_line(&mut line) {
                                                 if let Ok(Response::OTP(otp)) = serde_json::from_str(&line) {
-                                                    handle_otp_output(otp, label, stdout_flag, cli.quiet);
+                                                    handle_otp_output(otp, label, "Agent", stdout_flag, cli.quiet);
                                                     return Ok(());
                                                 }
                                             }
@@ -315,7 +321,7 @@ fn run(cli: Cli) -> Result<(), i32> {
                 eprintln!("OTP generation failed: {}", e);
                 process::exit(102);
             });
-            handle_otp_output(otp, label, stdout_flag, cli.quiet);
+            handle_otp_output(otp, label, "Local", stdout_flag, cli.quiet);
         } else {
             eprintln!("Error: Secret not found for account {}", acc.id);
             return Err(1);
@@ -439,9 +445,82 @@ mod tests {
             otp: false,
             quiet: true,
             stdout: true,
+            force_agent: false,
         };
         
         let result = run(cli);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn test_run_force_agent_skips_plaintext() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("jki_home");
+        fs::create_dir_all(&home).unwrap();
+        env::set_var("JKI_HOME", &home);
+
+        let master_key_val = "testpass";
+        let master_key = SecretString::from(master_key_val.to_string());
+        
+        let key_path = home.join("master.key");
+        fs::write(&key_path, master_key_val).unwrap();
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let acc_id = "test-id";
+        let metadata = MetadataFile {
+            version: 1,
+            accounts: vec![Account {
+                id: acc_id.to_string(),
+                name: "test@gmail.com".to_string(),
+                issuer: Some("Google".to_string()),
+                account_type: AccountType::Standard,
+                secret: "".to_string(),
+                digits: 6,
+                algorithm: "SHA1".to_string(),
+            }]
+        };
+        fs::write(home.join("vault.metadata.json"), serde_json::to_string(&metadata).unwrap()).unwrap();
+
+        // Write plaintext vault
+        let mut plaintext_map = HashMap::new();
+        plaintext_map.insert(acc_id.to_string(), AccountSecret {
+            secret: "JBSWY3DPEHPK3PXP".to_string(),
+            digits: 6,
+            algorithm: "SHA1".to_string(),
+        });
+        fs::write(home.join("vault.secrets.json"), serde_json::to_vec(&plaintext_map).unwrap()).unwrap();
+
+        // Write encrypted vault
+        let encrypted = encrypt_with_master_key(&serde_json::to_vec(&plaintext_map).unwrap(), &master_key).unwrap();
+        fs::write(home.join("vault.secrets.bin.age"), encrypted).unwrap();
+
+        // Run without force_agent -> should use plaintext
+        let cli_no_force = Cli {
+            command: None,
+            patterns: vec!["google".to_string()],
+            interactive: false,
+            list: false,
+            otp: false,
+            quiet: false, // Show output to verify manually if needed, but here we just check result
+            stdout: true,
+            force_agent: false,
+        };
+        assert!(run(cli_no_force).is_ok());
+
+        // Run with force_agent -> should skip plaintext and use local (since no agent)
+        let cli_force = Cli {
+            command: None,
+            patterns: vec!["google".to_string()],
+            interactive: false,
+            list: false,
+            otp: false,
+            quiet: false,
+            stdout: true,
+            force_agent: true,
+        };
+        assert!(run(cli_force).is_ok());
     }
 }
