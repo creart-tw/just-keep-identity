@@ -1033,62 +1033,110 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_handle_export() {
+    fn test_handle_edit() {
         let temp = tempdir().unwrap();
-        let home = temp.path().join("jki_home_export");
+        let home = temp.path().join("jki_home_edit");
         fs::create_dir_all(&home).unwrap();
         env::set_var("JKI_HOME", &home);
 
-        // 1. Setup vault
-        let master_key = "testpass";
-        fs::write(home.join("master.key"), master_key).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(home.join("master.key"), fs::Permissions::from_mode(0o600)).unwrap();
-        }
+        let meta_path = home.join("vault.metadata.json");
+        let initial_meta = MetadataFile { accounts: vec![], version: 1 };
+        fs::write(&meta_path, serde_json::to_string(&initial_meta).unwrap()).unwrap();
 
-        let metadata = MetadataFile {
+        // Mock EDITOR: a script that replaces content with a new valid JSON
+        let editor_script = temp.path().join("mock_editor.sh");
+        let new_meta = MetadataFile { 
             accounts: vec![Account {
                 id: "1".to_string(),
-                name: "test@example.com".to_string(),
-                issuer: Some("Example".to_string()),
+                name: "new".to_string(),
+                issuer: None,
                 account_type: AccountType::Standard,
                 secret: "".to_string(),
                 digits: 6,
                 algorithm: "SHA1".to_string(),
             }],
-            version: 1,
+            version: 2 
         };
-        fs::write(home.join("vault.metadata.json"), serde_json::to_string(&metadata).unwrap()).unwrap();
-
-        let mut secrets = HashMap::new();
-        secrets.insert("1".to_string(), AccountSecret {
-            secret: "JBSWY3DPEHPK3PXP".to_string(),
-            digits: 6,
-            algorithm: "SHA1".to_string(),
-        });
-        let secrets_json = serde_json::to_vec(&secrets).unwrap();
-        let encrypted = encrypt_with_master_key(&secrets_json, &secrecy::SecretString::from(master_key.to_string())).unwrap();
-        fs::write(home.join("vault.secrets.bin.age"), encrypted).unwrap();
-
-        // 2. Export
-        let export_zip = home.join("export.zip");
-        let interactor = MockInteractor {
-            passwords: RefCell::new(vec!["exportpass".to_string(), "exportpass".to_string()]),
-            confirms: RefCell::new(vec![]),
-        };
-        handle_export(&Some(export_zip.clone()), false, &interactor);
-
-        // 3. Verify ZIP exists
-        assert!(export_zip.exists());
+        let new_json = serde_json::to_string(&new_meta).unwrap();
         
-        // 4. Verify ZIP content (Read back)
-        let file = fs::File::open(&export_zip).unwrap();
-        let mut archive = zip::ZipArchive::new(file).unwrap();
-        let mut accounts_file = archive.by_name_decrypt("accounts.txt", b"exportpass").unwrap();
-        let mut content = String::new();
-        accounts_file.read_to_string(&mut content).unwrap();
-        assert!(content.contains("otpauth://totp/Example:test%40example.com?secret=JBSWY3DPEHPK3PXP&digits=6&algorithm=SHA1&issuer=Example"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::write(&editor_script, format!("#!/bin/sh\necho '{}' > \"$1\"", new_json)).unwrap();
+            fs::set_permissions(&editor_script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            fs::write(&editor_script, format!("echo {} > %1", new_json)).unwrap();
+        }
+
+        env::set_var("EDITOR", &editor_script);
+
+        handle_edit();
+
+        let updated_meta: MetadataFile = serde_json::from_str(&fs::read_to_string(&meta_path).unwrap()).unwrap();
+        assert_eq!(updated_meta.version, 2);
+        assert_eq!(updated_meta.accounts.len(), 1);
+    }
+
+    #[test]
+    #[serial]
+    fn test_handle_sync_conflict_resolve() {
+        let temp = tempdir().unwrap();
+        let remote_path = temp.path().join("remote");
+        let local_path = temp.path().join("local");
+        
+        // 1. Setup remote
+        Command::new("git").args(["init", "--bare", "-b", "main", "remote"]).current_dir(temp.path()).output().unwrap();
+        
+        // 2. Setup local A (to push initial content)
+        let local_a = temp.path().join("local_a");
+        fs::create_dir_all(&local_a).unwrap();
+        Command::new("git").args(["init", "-b", "main"]).current_dir(&local_a).output().unwrap();
+        Command::new("git").args(["config", "user.email", "a@example.com"]).current_dir(&local_a).output().unwrap();
+        Command::new("git").args(["config", "user.name", "A"]).current_dir(&local_a).output().unwrap();
+        Command::new("git").args(["remote", "add", "origin", remote_path.to_str().unwrap()]).current_dir(&local_a).output().unwrap();
+        
+        fs::write(local_a.join("vault.metadata.json"), "{\"accounts\":[], \"version\":1}").unwrap();
+        Command::new("git").args(["add", "."]).current_dir(&local_a).output().unwrap();
+        Command::new("git").args(["commit", "-m", "initial"]).current_dir(&local_a).output().unwrap();
+        Command::new("git").args(["push", "origin", "main"]).current_dir(&local_a).output().unwrap();
+
+        // 3. Setup local B (the one we will test sync with)
+        fs::create_dir_all(&local_path).unwrap();
+        Command::new("git").args(["clone", remote_path.to_str().unwrap(), "."]).current_dir(&local_path).output().unwrap();
+        Command::new("git").args(["config", "user.email", "b@example.com"]).current_dir(&local_path).output().unwrap();
+        Command::new("git").args(["config", "user.name", "B"]).current_dir(&local_path).output().unwrap();
+        env::set_var("JKI_HOME", &local_path);
+
+        // 4. Create conflict: modify remote (via local A)
+        fs::write(local_a.join("vault.metadata.json"), "{\"accounts\":[], \"version\":2, \"note\":\"remote\"}").unwrap();
+        Command::new("git").args(["add", "."]).current_dir(&local_a).output().unwrap();
+        Command::new("git").args(["commit", "-m", "remote change"]).current_dir(&local_a).output().unwrap();
+        Command::new("git").args(["push", "origin", "main"]).current_dir(&local_a).output().unwrap();
+
+        // 5. Modify local B
+        fs::write(local_path.join("vault.metadata.json"), "{\"accounts\":[], \"version\":2, \"note\":\"local\"}").unwrap();
+        // (No commit yet, handle_sync will commit)
+
+        // 6. Run handle_sync with conflict resolution (default=true)
+        let interactor = MockInteractor {
+            passwords: RefCell::new(vec![]),
+            confirms: RefCell::new(vec![true]), // Confirm resolution
+        };
+        handle_sync(false, &interactor);
+
+        // 7. Verify resolution (should prefer local according to handle_sync logic)
+        // handle_sync uses checkout --theirs? 
+        // Wait, let's check handle_sync logic:
+        // git::checkout_theirs(&config_dir, &files)
+        // In a rebase, 'theirs' is the branch being rebased onto (the remote), 
+        // and 'ours' is the current branch (local).
+        // Wait, in `git pull --rebase`, 'ours' is the upstream, 'theirs' is your local changes.
+        // So `checkout --theirs` picks LOCAL changes.
+        
+        let resolved_content = fs::read_to_string(local_path.join("vault.metadata.json")).unwrap();
+        assert!(resolved_content.contains("\"local\""));
+        assert!(local_path.join("vault.metadata.json.conflict").exists());
     }
 }

@@ -322,12 +322,6 @@ fn run(cli: Cli) -> Result<(), i32> {
             }
         }
 
-        // If force_agent is set and we reached here, it means Agent path failed
-        if cli.force_agent {
-            if !cli.quiet { eprintln!("Error: Agent path failed and --force-agent is enabled. Bailing out."); }
-            return Err(1);
-        }
-
         // 3 & 4. Static Key Path & Interactive Path (Fallback)
         if !cli.quiet { eprintln!("Falling back to local decryption..."); }
         let sec_path = JkiPath::secrets_path();

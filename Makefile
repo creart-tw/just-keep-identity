@@ -1,4 +1,4 @@
-.PHONY: all release install clean dev test-all help
+.PHONY: all release install clean dev test-all cov help
 
 # Directories
 BIN_DIR = $(HOME)/.local/bin
@@ -24,6 +24,10 @@ dev:
 ## test-all: Run all tests in the workspace
 test-all:
 	cargo test --workspace
+
+## cov: Run tests and generate coverage report (HTML)
+cov:
+	cargo tarpaulin --workspace --out Html
 
 ## install: Build and deploy binaries using install.sh
 install:

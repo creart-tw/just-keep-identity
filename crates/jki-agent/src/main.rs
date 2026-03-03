@@ -199,6 +199,7 @@ fn handle_client_io<S: Read + Write>(stream: S, state: Arc<Mutex<State>>) -> io:
 mod tests {
     use super::*;
     use std::io::Cursor;
+    use serial_test::serial;
 
     struct MockStream {
         input: Cursor<Vec<u8>>,
@@ -213,6 +214,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_handle_client_ping() {
         let state = Arc::new(Mutex::new(State::new(false)));
         let req = Request::Ping;
@@ -231,6 +233,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_handle_client_get_otp_locked() {
         let state = Arc::new(Mutex::new(State::new(false)));
         let req = Request::GetOTP { account_id: "test".to_string() };
@@ -249,6 +252,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_handle_client_unlock_and_get_otp() {
         use tempfile::tempdir;
         use std::env;
@@ -256,13 +260,13 @@ mod tests {
         use secrecy::SecretString;
 
         let temp = tempdir().unwrap();
-        let home = temp.path().join("jki_home");
+        let home = temp.path().join("jki_home_agent_test");
         std::fs::create_dir_all(&home).unwrap();
         
         // Explicitly set paths to avoid canonicalization issues in tests
         let sec_path = home.join("vault.secrets.bin.age");
-        env::set_var("JKI_HOME", &home);
-        env::set_var("JKI_SECRETS_PATH", &sec_path);
+        env::set_var("JKI_HOME", home.to_str().unwrap());
+        env::set_var("JKI_SECRETS_PATH", sec_path.to_str().unwrap());
 
         let master_key_val = "testpass";
         let master_key = SecretString::from(master_key_val.to_string());
@@ -306,10 +310,12 @@ mod tests {
         }
 
         // Cleanup env
+        env::remove_var("JKI_HOME");
         env::remove_var("JKI_SECRETS_PATH");
     }
 
     #[test]
+    #[serial]
     fn test_handle_client_malformed_json() {
         let state = Arc::new(Mutex::new(State::new(false)));
         let input_data = b"not a json\n";
@@ -325,17 +331,18 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_force_age_refusal() {
         use tempfile::tempdir;
         use std::env;
 
         let temp = tempdir().unwrap();
-        let home = temp.path().join("jki_home");
+        let home = temp.path().join("jki_home_force_age");
         std::fs::create_dir_all(&home).unwrap();
         
         let dec_path = home.join("vault.secrets.json");
-        env::set_var("JKI_HOME", &home);
-        env::set_var("JKI_DECRYPTED_SECRETS_PATH", &dec_path);
+        env::set_var("JKI_HOME", home.to_str().unwrap());
+        env::set_var("JKI_DECRYPTED_SECRETS_PATH", dec_path.to_str().unwrap());
         env::remove_var("JKI_SECRETS_PATH"); // Ensure .age is not found
 
         // Create plaintext vault only
@@ -368,6 +375,7 @@ mod tests {
         }
 
         // Cleanup env
+        env::remove_var("JKI_HOME");
         env::remove_var("JKI_DECRYPTED_SECRETS_PATH");
     }
 
