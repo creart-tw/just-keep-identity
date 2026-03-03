@@ -60,7 +60,7 @@
 2.  **Phase 2: Core Executor (jki)**：Rust 實作、資料拆分加密 (Done)。
 3.  **Phase 3: Management (jkim)**：Git 同步、編輯器模式、Master Key 工具集 (Done)。
 4.  **Phase 4: Agency & Key Caching (jki-agent)**：實作 Agent 快取機制與系統金鑰鏈串接。
-5.  **Phase 5: Refinement**：二進位優化 (rkyv)、安裝腳本。
+5.  **Phase 5: Productization & Reliability**：安裝腳本、程式碼清理與穩定性提升。
 
 ---
 *詳細操作範例與輸出格式請參考 `jki-cli-spec.md`。*

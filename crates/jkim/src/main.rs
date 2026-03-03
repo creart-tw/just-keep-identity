@@ -20,6 +20,9 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::env;
 use std::io::{Read, Write};
+use zip::write::SimpleFileOptions;
+use zip::CompressionMethod;
+use zip::AesMode;
 
 #[derive(Parser)]
 #[command(name = "jkim", version, about = "JK Suite Management Hub")]
@@ -82,6 +85,11 @@ enum Commands {
         #[arg(long)]
         force_new_vault: bool,
     },
+    /// Export all accounts to a password-protected ZIP file
+    Export {
+        /// Optional path for the export file
+        output: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -116,6 +124,79 @@ enum MasterKeyCommands {
 struct MetadataFile {
     accounts: Vec<Account>,
     version: u32,
+}
+
+fn handle_export(output: &Option<PathBuf>, force_interactive: bool, interactor: &dyn Interactor) {
+    let meta_path = JkiPath::metadata_path();
+    let sec_path = JkiPath::secrets_path();
+    let dec_path = JkiPath::decrypted_secrets_path();
+
+    if !meta_path.exists() {
+        eprintln!("Error: Metadata not found. Run 'jkim init' first.");
+        return;
+    }
+
+    // 1. Acquire Master Key
+    let master_key = acquire_master_key(force_interactive, interactor, Some(&KeyringStore)).unwrap_or_else(|e| {
+        eprintln!("Authentication failed: {}", e);
+        std::process::exit(1);
+    });
+
+    // 2. Load Metadata
+    let meta_content = fs::read_to_string(&meta_path).expect("Failed to read metadata");
+    let metadata: MetadataFile = serde_json::from_str(&meta_content).expect("Failed to parse metadata");
+
+    // 3. Load Secrets
+    let secrets_map: HashMap<String, AccountSecret> = if dec_path.exists() {
+        let content = fs::read(&dec_path).expect("Failed to read plaintext secrets");
+        serde_json::from_slice(&content).expect("Failed to parse plaintext secrets")
+    } else if sec_path.exists() {
+        let encrypted = fs::read(&sec_path).expect("Failed to read secrets file");
+        let decrypted = decrypt_with_master_key(&encrypted, &master_key).expect("Decryption failed");
+        serde_json::from_slice(&decrypted).expect("Failed to parse existing secrets JSON")
+    } else {
+        eprintln!("Error: Secrets not found.");
+        return;
+    };
+
+    // 4. Integrate
+    let (integrated, missing) = jki_core::integrate_accounts(metadata.accounts, &secrets_map);
+    if !missing.is_empty() {
+        eprintln!("Warning: Some accounts are missing secrets: {:?}", missing);
+    }
+
+    // 5. Prompt for Export Password
+    let export_pass = interactor.prompt_password("Enter EXPORT Password (for ZIP encryption)").expect("Input failed");
+    let export_pass_confirm = interactor.prompt_password("Confirm EXPORT Password").expect("Input failed");
+    if export_pass.expose_secret() != export_pass_confirm.expose_secret() {
+        eprintln!("Error: Passwords do not match.");
+        return;
+    }
+
+    // 6. Determine output path
+    let output_path = output.clone().unwrap_or_else(|| {
+        let now = chrono::Local::now();
+        PathBuf::from(format!("export_{}.zip", now.format("%Y%m%d_%H%M")))
+    });
+
+    // 7. Create ZIP
+    let file = fs::File::create(&output_path).expect("Failed to create export file");
+    let mut zip = zip::ZipWriter::new(file);
+
+    let options = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Deflated)
+        .with_aes_encryption(AesMode::Aes256, export_pass.expose_secret());
+
+    zip.start_file("accounts.txt", options).expect("Failed to start file in ZIP");
+    
+    for acc in integrated {
+        let uri = acc.to_otpauth_uri();
+        zip.write_all(uri.as_bytes()).expect("Failed to write to ZIP");
+        zip.write_all(b"\n").expect("Failed to write newline to ZIP");
+    }
+
+    zip.finish().expect("Failed to finalize ZIP");
+    println!("Export completed successfully: {:?}", output_path);
 }
 
 fn handle_status() {
@@ -679,12 +760,14 @@ fn main() {
         Commands::MasterKey(m) => handle_master_key(m, cli.interactive, cli.default, &interactor),
         Commands::ImportWinauth { file, overwrite, force_new_vault } => 
             handle_import_winauth(file, *overwrite, cli.interactive, cli.default, &interactor, *force_new_vault),
+        Commands::Export { output } => handle_export(output, cli.interactive, &interactor),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jki_core::AccountType;
     use serial_test::serial;
     use tempfile::tempdir;
     use std::env;
@@ -899,5 +982,66 @@ mod tests {
         handle_encrypt(false, false, false, &interactor);
         assert!(!dec_path.exists());
         assert!(sec_path.exists());
+    }
+
+    #[test]
+    #[serial]
+    fn test_handle_export() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("jki_home_export");
+        fs::create_dir_all(&home).unwrap();
+        env::set_var("JKI_HOME", &home);
+
+        // 1. Setup vault
+        let master_key = "testpass";
+        fs::write(home.join("master.key"), master_key).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(home.join("master.key"), fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let metadata = MetadataFile {
+            accounts: vec![Account {
+                id: "1".to_string(),
+                name: "test@example.com".to_string(),
+                issuer: Some("Example".to_string()),
+                account_type: AccountType::Standard,
+                secret: "".to_string(),
+                digits: 6,
+                algorithm: "SHA1".to_string(),
+            }],
+            version: 1,
+        };
+        fs::write(home.join("vault.metadata.json"), serde_json::to_string(&metadata).unwrap()).unwrap();
+
+        let mut secrets = HashMap::new();
+        secrets.insert("1".to_string(), AccountSecret {
+            secret: "JBSWY3DPEHPK3PXP".to_string(),
+            digits: 6,
+            algorithm: "SHA1".to_string(),
+        });
+        let secrets_json = serde_json::to_vec(&secrets).unwrap();
+        let encrypted = encrypt_with_master_key(&secrets_json, &secrecy::SecretString::from(master_key.to_string())).unwrap();
+        fs::write(home.join("vault.secrets.bin.age"), encrypted).unwrap();
+
+        // 2. Export
+        let export_zip = home.join("export.zip");
+        let interactor = MockInteractor {
+            passwords: RefCell::new(vec!["exportpass".to_string(), "exportpass".to_string()]),
+            confirms: RefCell::new(vec![]),
+        };
+        handle_export(&Some(export_zip.clone()), false, &interactor);
+
+        // 3. Verify ZIP exists
+        assert!(export_zip.exists());
+        
+        // 4. Verify ZIP content (Read back)
+        let file = fs::File::open(&export_zip).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut accounts_file = archive.by_name_decrypt("accounts.txt", b"exportpass").unwrap();
+        let mut content = String::new();
+        accounts_file.read_to_string(&mut content).unwrap();
+        assert!(content.contains("otpauth://totp/Example:test%40example.com?secret=JBSWY3DPEHPK3PXP&digits=6&algorithm=SHA1&issuer=Example"));
     }
 }

@@ -12,7 +12,7 @@
 - `crates/jki`：極速查詢器 (CLI Executor)。
 - `crates/jkim`：管理中心 (TUI & CRUD)。
 - `crates/jki-agent`：背景授權服務 (Session Agent)。
-- `crates/jki-core`：共享核心邏輯 (TOTP, Crypto, rkyv)。
+- `crates/jki-core`：共享核心邏輯 (TOTP, Crypto)。
 
 ## 快速開始
 1. **編譯**：

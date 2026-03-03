@@ -1,4 +1,3 @@
-use rkyv::{Archive, Deserialize, Serialize};
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 use secrecy::SecretString;
 use std::io::{Read, Write};
@@ -7,8 +6,7 @@ pub mod import;
 pub mod paths;
 pub mod keychain;
 
-#[derive(Archive, Deserialize, Serialize, SerdeDeserialize, SerdeSerialize, Debug, Clone, PartialEq)]
-#[archive(check_bytes)]
+#[derive(SerdeDeserialize, SerdeSerialize, Debug, Clone, PartialEq)]
 pub struct Account {
     pub id: String,
     pub name: String,
@@ -27,16 +25,39 @@ pub struct Account {
 fn default_digits() -> u32 { 6 }
 fn default_algorithm() -> String { "SHA1".to_string() }
 
-#[derive(Archive, Deserialize, Serialize, SerdeDeserialize, SerdeSerialize, Debug, Clone, PartialEq)]
-#[archive(check_bytes)]
+impl Account {
+    pub fn to_otpauth_uri(&self) -> String {
+        use urlencoding::encode;
+        let label = if let Some(ref issuer) = self.issuer {
+            format!("{}:{}", encode(issuer), encode(&self.name))
+        } else {
+            encode(&self.name).into_owned()
+        };
+
+        let mut uri = format!(
+            "otpauth://totp/{}?secret={}&digits={}&algorithm={}",
+            label,
+            self.secret,
+            self.digits,
+            self.algorithm.to_uppercase()
+        );
+
+        if let Some(ref issuer) = self.issuer {
+            uri.push_str(&format!("&issuer={}", encode(issuer)));
+        }
+
+        uri
+    }
+}
+
+#[derive(SerdeDeserialize, SerdeSerialize, Debug, Clone, PartialEq)]
 pub enum AccountType {
     Standard,
     Steam,
     Blizzard,
 }
 
-#[derive(Archive, Deserialize, Serialize, SerdeDeserialize, SerdeSerialize, Debug, Clone)]
-#[archive(check_bytes)]
+#[derive(SerdeDeserialize, SerdeSerialize, Debug, Clone)]
 pub struct AccountSecret {
     pub secret: String,
     pub digits: u32,
@@ -589,5 +610,32 @@ mod tests {
         interactor.passwords.borrow_mut().push("interactive_fallback".to_string());
         let key = acquire_master_key(false, &interactor, Some(&mock_store)).unwrap();
         assert_eq!(key.expose_secret(), "interactive_fallback");
+    }
+
+    #[test]
+    fn test_to_otpauth_uri() {
+        let acc = Account {
+            id: "test-id".to_string(),
+            name: "user@example.com".to_string(),
+            issuer: Some("Google".to_string()),
+            account_type: AccountType::Standard,
+            secret: "JBSWY3DPEHPK3PXP".to_string(),
+            digits: 6,
+            algorithm: "SHA1".to_string(),
+        };
+        let uri = acc.to_otpauth_uri();
+        assert_eq!(uri, "otpauth://totp/Google:user%40example.com?secret=JBSWY3DPEHPK3PXP&digits=6&algorithm=SHA1&issuer=Google");
+
+        let acc_no_issuer = Account {
+            id: "test-id-2".to_string(),
+            name: "standalone".to_string(),
+            issuer: None,
+            account_type: AccountType::Standard,
+            secret: "SECRET123".to_string(),
+            digits: 8,
+            algorithm: "SHA256".to_string(),
+        };
+        let uri2 = acc_no_issuer.to_otpauth_uri();
+        assert_eq!(uri2, "otpauth://totp/standalone?secret=SECRET123&digits=8&algorithm=SHA256");
     }
 }
