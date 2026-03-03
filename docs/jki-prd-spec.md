@@ -17,6 +17,13 @@
 *   **物理邊界 (Physical Boundary)**：單一關鍵字 (Pattern) 必須完全落在「單一欄位」內（Issuer 或 Account Name）。嚴禁單一關鍵字跨越欄位邊界匹配（例如 `gh` 不能一半匹配 `[G]oogle` 一半匹配 `lic[h]ih`），以消除高密度資料下的雜訊。
 *   **多維交集 (Multi-pattern AND Logic)**：空格分隔的多個關鍵字採交集 (AND) 邏輯。例如 `jki g li` 表示「(關鍵字 g 存在於任一欄位) AND (關鍵字 li 存在於任一欄位)」。這能讓使用者透過極短的字元組合精準定位身份。
 
+#### **1.4 金庫狀態與極速路徑 (Vault States & Speed Path)**
+*   **狀態靈活性**：JKI 支援「透明脫殼模式」。使用者可選擇將金庫解密為明文存放在磁碟上，以換取極致的查詢效能。
+*   **狀態定義**：
+    *   **Encrypted (標準)**：磁碟僅存 `.age` 加密檔，需密碼或 Agent。
+    *   **Plaintext (極速)**：磁碟存在 `vault.secrets.json` 明文檔。`jki` 應自動偵測並優先讀取此檔，繞過所有身份驗證與 IPC 流程，達成真正的零延遲。
+*   **狀態轉換 (Transition)**：提供 `jkim decrypt` 與 `jkim encrypt` 進行手動狀態切換。管理工具 (jkim) 在混合狀態下應具備自動同步/封裝的預設行為。
+
 ### ---
 
 **第二章：架構定義 (Architecture)**

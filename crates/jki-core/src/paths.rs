@@ -35,6 +35,12 @@ impl JkiPath {
             .unwrap_or_else(|_| Self::home_dir().join("vault.secrets.bin.age"))
     }
 
+    pub fn decrypted_secrets_path() -> PathBuf {
+        env::var("JKI_DECRYPTED_SECRETS_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| Self::home_dir().join("vault.secrets.json"))
+    }
+
     pub fn master_key_path() -> PathBuf {
         env::var("JKI_MASTER_KEY_PATH")
             .map(PathBuf::from)

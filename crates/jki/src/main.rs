@@ -217,6 +217,26 @@ fn run(cli: Cli) -> Result<(), i32> {
     if let Some(acc) = target_acc {
         let label = format!("{}{}", acc.issuer.as_deref().map(|s| format!("[{}] ", s)).unwrap_or_default(), acc.name);
         
+        // 1. Plaintext Path: Check vault.secrets.json first (Fastest)
+        let decrypted_path = JkiPath::decrypted_secrets_path();
+        if decrypted_path.exists() {
+            if let Ok(content) = fs::read(&decrypted_path) {
+                if let Ok(secrets_map) = serde_json::from_slice::<HashMap<String, AccountSecret>>(&content) {
+                    if let Some(s) = secrets_map.get(&acc.id) {
+                        let mut full_acc = acc.clone();
+                        full_acc.secret = s.secret.clone();
+                        full_acc.digits = s.digits;
+                        full_acc.algorithm = s.algorithm.clone();
+                        if let Ok(otp) = generate_otp(&full_acc) {
+                            handle_otp_output(otp, label, stdout_flag, cli.quiet);
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Agent Path: Connect to jki-agent
         if ensure_agent_running(cli.quiet) {
             let socket_path = JkiPath::agent_socket_path();
             if let Ok(mut stream) = LocalSocketStream::connect(socket_path.to_str().unwrap()) {
@@ -272,6 +292,7 @@ fn run(cli: Cli) -> Result<(), i32> {
             }
         }
 
+        // 3 & 4. Static Key Path & Interactive Path (Fallback)
         if !cli.quiet { eprintln!("Falling back to local decryption..."); }
         let sec_path = JkiPath::secrets_path();
         let interactor = TerminalInteractor;

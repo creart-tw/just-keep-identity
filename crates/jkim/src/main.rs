@@ -45,6 +45,18 @@ enum Commands {
     Sync,
     /// Edit metadata manually using your default editor
     Edit,
+    /// Decrypt the vault to plaintext JSON (for zero-latency mode)
+    Decrypt {
+        /// Force overwrite of existing vault.secrets.json
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Encrypt the plaintext JSON vault back to .age
+    Encrypt {
+        /// Force overwrite of existing vault.secrets.bin.age
+        #[arg(short, long)]
+        force: bool,
+    },
     /// Manage the Master Key
     #[command(subcommand)]
     MasterKey(MasterKeyCommands),
@@ -58,6 +70,9 @@ enum Commands {
         /// If decryption fails, discard existing vault and create a new one
         #[arg(long)]
         force_new_vault: bool,
+        /// Skip confirmation prompts
+        #[arg(short, long)]
+        yes: bool,
     },
 }
 
@@ -331,6 +346,60 @@ fn handle_edit() {
     }
 }
 
+fn handle_decrypt(force: bool, force_interactive: bool, interactor: &dyn Interactor) {
+    let sec_path = JkiPath::secrets_path();
+    let dec_path = JkiPath::decrypted_secrets_path();
+
+    if !sec_path.exists() {
+        eprintln!("Error: Encrypted vault not found at {:?}", sec_path);
+        return;
+    }
+
+    if dec_path.exists() && !force {
+        if !interactor.confirm(&format!("Warning: Plaintext vault already exists at {:?}. Overwrite?", dec_path)) {
+            return;
+        }
+    }
+
+    let master_key = acquire_master_key(force_interactive, interactor).expect("Authentication failed");
+    let encrypted = fs::read(&sec_path).expect("Failed to read secrets");
+    let decrypted = decrypt_with_master_key(&encrypted, &master_key).expect("Decryption failed");
+
+    fs::write(&dec_path, &decrypted).expect("Failed to write plaintext vault");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&dec_path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    println!("Vault decrypted to plaintext at {:?}", dec_path);
+    println!("Note: jki will now use this for zero-latency lookups.");
+}
+
+fn handle_encrypt(force: bool, force_interactive: bool, interactor: &dyn Interactor) {
+    let sec_path = JkiPath::secrets_path();
+    let dec_path = JkiPath::decrypted_secrets_path();
+
+    if !dec_path.exists() {
+        eprintln!("Error: Plaintext vault not found at {:?}", dec_path);
+        return;
+    }
+
+    if sec_path.exists() && !force {
+        if !interactor.confirm(&format!("Warning: Encrypted vault already exists at {:?}. Overwrite?", sec_path)) {
+            return;
+        }
+    }
+
+    let master_key = acquire_master_key(force_interactive, interactor).expect("Authentication failed");
+    let decrypted = fs::read(&dec_path).expect("Failed to read plaintext secrets");
+    let encrypted = encrypt_with_master_key(&decrypted, &master_key).expect("Encryption failed");
+
+    fs::write(&sec_path, encrypted).expect("Failed to write encrypted vault");
+    fs::remove_file(&dec_path).expect("Failed to delete plaintext vault after encryption");
+    println!("Vault encrypted to {:?}", sec_path);
+    println!("Plaintext vault physically deleted.");
+}
+
 fn handle_init(force: bool) {
     let config_dir = JkiPath::home_dir();
     println!("Initializing JKI Home at {:?}...", config_dir);
@@ -397,20 +466,27 @@ fn handle_init(force: bool) {
     println!("  - Run 'jkim import-winauth <file>' to add accounts.");
 }
 
-fn handle_import_winauth(file: &PathBuf, overwrite: bool, force_interactive: bool, interactor: &dyn Interactor, force_new_vault: bool) {
+fn handle_import_winauth(file: &PathBuf, overwrite: bool, force_interactive: bool, interactor: &dyn Interactor, force_new_vault: bool, yes: bool) {
     if !file.exists() { eprintln!("Error: File not found."); return; }
 
     let meta_path = JkiPath::metadata_path();
     let sec_path = JkiPath::secrets_path();
+    let dec_path = JkiPath::decrypted_secrets_path();
+    let key_path = JkiPath::master_key_path();
 
-    // 1. Acquire Master Key EARLIER (We need it to load existing secrets)
+    // 1. Detect State
+    let is_plaintext = dec_path.exists();
+    let is_encrypted = sec_path.exists();
+    let has_master_key = key_path.exists();
+
+    // 2. Acquire Master Key
     println!("Please unlock your vault to perform import.");
     let master_key = acquire_master_key(force_interactive, interactor).unwrap_or_else(|e| {
         eprintln!("Authentication failed: {}", e);
         std::process::exit(1);
     });
 
-    // 2. Load existing Metadata
+    // 3. Load existing Metadata
     let mut metadata = if meta_path.exists() {
         let content = fs::read_to_string(&meta_path).unwrap_or_default();
         serde_json::from_str::<MetadataFile>(&content).unwrap_or(MetadataFile { accounts: vec![], version: 1 })
@@ -418,8 +494,11 @@ fn handle_import_winauth(file: &PathBuf, overwrite: bool, force_interactive: boo
         MetadataFile { accounts: vec![], version: 1 }
     };
 
-    // 3. Load and Decrypt existing Secrets (Merge-aware)
-    let mut secrets_map: HashMap<String, AccountSecret> = if sec_path.exists() {
+    // 4. Load Secrets (Prefer Plaintext if it exists, otherwise Encrypted)
+    let mut secrets_map: HashMap<String, AccountSecret> = if is_plaintext {
+        let content = fs::read(&dec_path).expect("Failed to read plaintext secrets");
+        serde_json::from_slice(&content).expect("Failed to parse plaintext secrets")
+    } else if is_encrypted {
         let encrypted = fs::read(&sec_path).expect("Failed to read secrets file");
         match decrypt_with_master_key(&encrypted, &master_key) {
             Ok(decrypted) => serde_json::from_slice(&decrypted).expect("Failed to parse existing secrets JSON"),
@@ -430,11 +509,6 @@ fn handle_import_winauth(file: &PathBuf, overwrite: bool, force_interactive: boo
                     HashMap::new()
                 } else {
                     eprintln!("\n[Error] Master Key incorrect for the existing vault ({}).", e);
-                    eprintln!("\nPossible solutions:");
-                    eprintln!("  1. Re-run with the correct Master Key.");
-                    eprintln!("  2. If you want to DISCARD the existing vault and start fresh:");
-                    eprintln!("     - Use 'jkim import-winauth <file> --force-new-vault'");
-                    eprintln!("     - Or run 'jkim init --force' first to clean the environment.");
                     std::process::exit(101);
                 }
             }
@@ -443,7 +517,7 @@ fn handle_import_winauth(file: &PathBuf, overwrite: bool, force_interactive: boo
         HashMap::new()
     };
 
-    // 4. Process Import
+    // 5. Process Import
     let content = fs::read_to_string(file).expect("Failed to read file");
     let mut new_count = 0;
     let mut updated_count = 0;
@@ -457,7 +531,6 @@ fn handle_import_winauth(file: &PathBuf, overwrite: bool, force_interactive: boo
                 let id = metadata.accounts[pos].id.clone();
                 
                 if !overwrite {
-                    // 即使跳過 Metadata 更新，如果 secrets_map 裡已有，也必須保留
                     skip_count += 1;
                     continue;
                 }
@@ -481,12 +554,36 @@ fn handle_import_winauth(file: &PathBuf, overwrite: bool, force_interactive: boo
         }
     }
 
-    // 5. Encrypt and Save
+    // 6. Save back
     let secrets_json = serde_json::to_vec(&secrets_map).unwrap();
-    let encrypted_data = encrypt_with_master_key(&secrets_json, &master_key).expect("Encryption failed");
+    
+    // Hybrid state logic: if master_key exists, always encrypt to .age
+    if has_master_key {
+        let mut should_seal = true;
+        if !yes && is_plaintext {
+            should_seal = interactor.confirm("Master Key exists. Encrypt and delete plaintext vault?");
+        }
+        
+        if should_seal {
+            let encrypted_data = encrypt_with_master_key(&secrets_json, &master_key).expect("Encryption failed");
+            fs::write(&sec_path, encrypted_data).unwrap();
+            if dec_path.exists() { let _ = fs::remove_file(&dec_path); }
+            if is_plaintext { println!("Vault encrypted and plaintext deleted."); }
+            else { println!("Saved to encrypted vault."); }
+        } else {
+            fs::write(&dec_path, &secrets_json).unwrap();
+            println!("Saved to plaintext vault as requested.");
+        }
+    } else if is_plaintext {
+        fs::write(&dec_path, &secrets_json).unwrap();
+        println!("Saved to plaintext vault.");
+    } else {
+        let encrypted_data = encrypt_with_master_key(&secrets_json, &master_key).expect("Encryption failed");
+        fs::write(&sec_path, encrypted_data).unwrap();
+        println!("Saved to encrypted vault.");
+    }
 
     fs::write(&meta_path, serde_json::to_string_pretty(&metadata).unwrap()).unwrap();
-    fs::write(&sec_path, encrypted_data).unwrap();
 
     println!("\nImport completed successfully!");
     println!("  - New: {}, Updated: {}, Skipped: {}", new_count, updated_count, skip_count);
@@ -501,9 +598,11 @@ fn main() {
         Commands::Init { force } => handle_init(*force),
         Commands::Sync => handle_sync(),
         Commands::Edit => handle_edit(),
+        Commands::Decrypt { force } => handle_decrypt(*force, cli.interactive, &interactor),
+        Commands::Encrypt { force } => handle_encrypt(*force, cli.interactive, &interactor),
         Commands::MasterKey(m) => handle_master_key(m, cli.interactive, &interactor),
-        Commands::ImportWinauth { file, overwrite, force_new_vault } => 
-            handle_import_winauth(file, *overwrite, cli.interactive, &interactor, *force_new_vault),
+        Commands::ImportWinauth { file, overwrite, force_new_vault, yes } => 
+            handle_import_winauth(file, *overwrite, cli.interactive, &interactor, *force_new_vault, *yes),
     }
 }
 
@@ -600,7 +699,7 @@ mod tests {
         let home = temp.path().join("jki_home");
         env::set_var("JKI_HOME", &home);
 
-        handle_init();
+        handle_init(false);
 
         assert!(home.exists());
         assert!(home.join(".git").exists());
@@ -618,7 +717,7 @@ mod tests {
         // Before init
         handle_status();
         
-        handle_init();
+        handle_init(false);
         
         // After init
         handle_status();
@@ -648,7 +747,7 @@ mod tests {
             passwords: RefCell::new(vec![]),
             confirms: RefCell::new(vec![]),
         };
-        handle_import_winauth(&import_file, false, false, &interactor);
+        handle_import_winauth(&import_file, false, false, &interactor, false, true);
 
         // 4. Verify files
         let meta_path = home.join("vault.metadata.json");
@@ -671,7 +770,7 @@ mod tests {
         env::set_var("JKI_HOME", &home);
 
         // 1. Init
-        handle_init();
+        handle_init(false);
         
         // 2. Add some file
         fs::write(home.join("test.txt"), "content").unwrap();
@@ -686,5 +785,41 @@ mod tests {
             .unwrap();
         let log = String::from_utf8_lossy(&output.stdout);
         assert!(log.contains("jki backup:"));
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn test_handle_decrypt_encrypt() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("jki_home_de_en");
+        fs::create_dir_all(&home).unwrap();
+        env::set_var("JKI_HOME", &home);
+
+        let key_path = home.join("master.key");
+        fs::write(&key_path, "testpass").unwrap();
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let sec_path = home.join("vault.secrets.bin.age");
+        let dec_path = home.join("vault.secrets.json");
+        let secrets_map: HashMap<String, AccountSecret> = HashMap::new();
+        let secrets_map_json = serde_json::to_vec(&secrets_map).unwrap();
+        let encrypted = encrypt_with_master_key(&secrets_map_json, &secrecy::SecretString::from("testpass".to_string())).unwrap();
+        fs::write(&sec_path, encrypted).unwrap();
+
+        let interactor = MockInteractor {
+            passwords: RefCell::new(vec![]),
+            confirms: RefCell::new(vec![true, true]),
+        };
+        
+        // 1. Decrypt
+        handle_decrypt(false, false, &interactor);
+        assert!(dec_path.exists());
+
+        // 2. Encrypt
+        handle_encrypt(false, false, &interactor);
+        assert!(!dec_path.exists());
+        assert!(sec_path.exists());
     }
 }

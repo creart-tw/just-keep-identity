@@ -49,20 +49,22 @@
 *   `remove [--force]`: 刪除磁碟上的 `master.key`。
 *   `change [--commit]`: 重新加密金庫並變更金鑰。
 
-### **3.3 資料匯入 (import-winauth)**
-`jkim import-winauth <FILE> [--overwrite] [--force-new-vault]`
-*   **預設行為**：嘗試使用 Master Key 解密現有金庫以進行「增量合併 (Merge)」。
-*   **旗標**:
-    *   `--overwrite`: 若匯入項目與現有帳號重複，則強制覆寫 Metadata 與 Secret。
-    *   `--force-new-vault`: **強制作廢模式**。若無法解密現有金庫（如密碼錯誤或金庫毀損），則直接放棄舊資料，以本次輸入的密碼建立全新的金庫並完成匯入。
+### **3.3 資料管理 (Vault Management)**
+*   `decrypt`: 將金庫解密為明文 (`vault.secrets.json`)。預設保留 `master.key`。
+*   `encrypt`: 將明文金庫重新封裝為加密檔 (`.age`) 並物理刪除明文。
+*   `import-winauth <FILE> [--overwrite] [--force-new-vault]`: 
+    *   **狀態感知**：若存在明文金庫且具備 `master.key`，匯入後應自動壓回加密檔。
+    *   **預設行為**：所有狀態變更應在 Stderr 提示，並支援 `-y, --yes` 跳過詢問。
 
 ### **3.4 資料編輯 (edit)**
 `jkim edit`
 *   採用 `crontab -e` 流程。開啟 `$EDITOR` 並於儲存後執行 JSON 驗證。
+*   **優先序**：若存在明文金庫，優先編輯明文；否則編輯 Metadata 並從加密金庫讀取（需解鎖）。
 
 ### **3.5 同步 (sync)**
 `jkim sync`
 *   執行 Git 原子化備份：`add` -> `commit` -> `pull --rebase` -> `push`。
+*   **注意**：明文金庫應始終被 `.gitignore` 排除，不參與同步。
 
 ---
 
@@ -72,6 +74,7 @@
 *   **stderr**: 用於提示、警告、以及密碼輸入。
 *   **stdout**: 僅用於純淨的資料輸出。
 
-### **4.2 錯誤處理與解決方案引導**
-*   **禁止 Panic**: 嚴禁在正常業務流程中發生 Thread Panic。
-*   **解決方案導引**: 當發生「密碼錯誤」或「資料衝突」時，系統必須在錯誤訊息後條列式提供可能的解決方案（如建議使用的旗標或手動排除步驟）。
+### **4.2 衝突處理規範 (Conflict Handling)**
+*   **原則**：發生「狀態衝突」（如兩份金庫皆存在且資料不一）時，強制使用者確認預設行為。
+*   **自動化支援**：支援 `-y, --yes`（或在適當情境下 `-f, --force`）來套用預設安全路徑，不進行互動式詢問。
+
