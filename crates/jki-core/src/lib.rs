@@ -254,14 +254,19 @@ pub fn acquire_master_key(
         return interactor.prompt_password("Enter Master Key");
     }
 
-    // 1. Try Secret Store (Keychain/Keyring)
+    // 1. Try Agent first (Session aware)
+    if let Ok(key) = agent::AgentClient::get_master_key() {
+        return Ok(key);
+    }
+
+    // 2. Try Secret Store (Keychain/Keyring)
     if let Some(store) = secret_store {
         if let Ok(key) = store.get_secret("jki", "master_key") {
             return Ok(key);
         }
     }
 
-    // 2. Try master.key file
+    // 3. Try master.key file
     let key_path = JkiPath::master_key_path();
     if key_path.exists() {
         if JkiPath::check_secure_permissions(&key_path).is_ok() {
@@ -270,18 +275,76 @@ pub fn acquire_master_key(
         }
     }
 
-    // 3. Fallback to interactive prompt
+    // 4. Fallback to interactive prompt
     interactor.prompt_password("Enter Master Key")
+}
+
+pub fn ensure_agent_running(quiet: bool) -> bool {
+    use crate::paths::JkiPath;
+    use interprocess::local_socket::LocalSocketStream;
+    use std::process;
+
+    let socket_path = JkiPath::agent_socket_path();
+    if socket_path.exists() {
+        if let Ok(_) = LocalSocketStream::connect(socket_path.to_str().unwrap()) {
+            return true;
+        }
+        if !cfg!(windows) {
+            let _ = std::fs::remove_file(&socket_path);
+        }
+    }
+
+    if !quiet { eprintln!("Starting jki-agent..."); }
+    
+    let current_exe = std::env::current_exe().expect("Failed to get current exe");
+    let mut agent_exe = current_exe.parent().unwrap().join("jki-agent");
+    
+    // Handle cargo test/run where binaries might be in the parent directory of 'deps'
+    if !agent_exe.exists() {
+        if let Some(parent) = current_exe.parent() {
+            if parent.ends_with("deps") {
+                if let Some(grandparent) = parent.parent() {
+                    let alt_agent_exe = grandparent.join("jki-agent");
+                    if alt_agent_exe.exists() {
+                        agent_exe = alt_agent_exe;
+                    }
+                }
+            }
+        }
+    }
+    
+    let child = process::Command::new(agent_exe)
+        .stdin(process::Stdio::null())
+        .stdout(process::Stdio::null())
+        .stderr(process::Stdio::null())
+        .spawn();
+
+    match child {
+        Ok(_) => {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            true
+        }
+        Err(e) => {
+            if !quiet { eprintln!("Failed to start jki-agent: {}", e); }
+            false
+        }
+    }
 }
 
 pub mod agent {
     use serde::{Deserialize, Serialize};
+    use std::io::{Read, Write, BufReader, BufRead};
+    use interprocess::local_socket::LocalSocketStream;
+    use crate::paths::JkiPath;
+    use secrecy::{SecretString, ExposeSecret};
 
     #[derive(Serialize, Deserialize, Debug)]
     pub enum Request {
         Ping,
         Unlock { master_key: String },
         GetOTP { account_id: String },
+        GetMasterKey,
+        Reload,
     }
 
     #[derive(Serialize, Deserialize, Debug)]
@@ -289,7 +352,70 @@ pub mod agent {
         Pong,
         Unlocked(String),
         OTP(String),
+        MasterKey(String),
+        Success,
         Error(String),
+    }
+
+    pub struct AgentClient;
+
+    impl AgentClient {
+        fn connect() -> Result<LocalSocketStream, String> {
+            let socket_path = JkiPath::agent_socket_path();
+            let name = socket_path.to_str().ok_or("Invalid socket path")?;
+            LocalSocketStream::connect(name).map_err(|e| e.to_string())
+        }
+
+        fn call(req: Request) -> Result<Response, String> {
+            let mut stream = Self::connect()?;
+            let req_json = serde_json::to_string(&req).map_err(|e| e.to_string())?;
+            stream.write_all(format!("{}\n", req_json).as_bytes()).map_err(|e| e.to_string())?;
+            stream.flush().map_err(|e| e.to_string())?;
+
+            let mut line = String::new();
+            let mut reader = BufReader::new(stream);
+            reader.read_line(&mut line).map_err(|e| e.to_string())?;
+            serde_json::from_str(&line).map_err(|e| e.to_string())
+        }
+
+        pub fn ping() -> bool {
+            match Self::call(Request::Ping) {
+                Ok(Response::Pong) => true,
+                _ => false,
+            }
+        }
+
+        pub fn unlock(master_key: &SecretString) -> Result<String, String> {
+            match Self::call(Request::Unlock { master_key: master_key.expose_secret().clone() }) {
+                Ok(Response::Unlocked(source)) => Ok(source),
+                Ok(Response::Error(e)) => Err(e),
+                _ => Err("Invalid agent response".to_string()),
+            }
+        }
+
+        pub fn get_otp(account_id: &str) -> Result<String, String> {
+            match Self::call(Request::GetOTP { account_id: account_id.to_string() }) {
+                Ok(Response::OTP(otp)) => Ok(otp),
+                Ok(Response::Error(e)) => Err(e),
+                _ => Err("Invalid agent response".to_string()),
+            }
+        }
+
+        pub fn get_master_key() -> Result<SecretString, String> {
+            match Self::call(Request::GetMasterKey) {
+                Ok(Response::MasterKey(key)) => Ok(SecretString::from(key)),
+                Ok(Response::Error(e)) => Err(e),
+                _ => Err("Agent is locked".to_string()),
+            }
+        }
+
+        pub fn reload() -> Result<(), String> {
+            match Self::call(Request::Reload) {
+                Ok(Response::Success) => Ok(()),
+                Ok(Response::Error(e)) => Err(e),
+                _ => Err("Invalid agent response".to_string()),
+            }
+        }
     }
 }
 

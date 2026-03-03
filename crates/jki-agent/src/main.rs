@@ -25,6 +25,7 @@ struct Args {
 
 struct State {
     secrets: Option<HashMap<String, AccountSecret>>,
+    master_key: Option<secrecy::SecretString>,
     last_unlocked: Option<Instant>,
     ttl: Duration,
     force_age: bool,
@@ -34,6 +35,7 @@ impl State {
     fn new(force_age: bool) -> Self {
         Self {
             secrets: None,
+            master_key: None,
             last_unlocked: None,
             ttl: Duration::from_secs(3600), // 1 hour TTL
             force_age,
@@ -44,6 +46,7 @@ impl State {
         if let Some(last) = self.last_unlocked {
             if last.elapsed() > self.ttl {
                 self.secrets = None;
+                self.master_key = None;
                 self.last_unlocked = None;
             }
         }
@@ -53,7 +56,7 @@ impl State {
         let sec_path = JkiPath::secrets_path();
         let decrypted_path = JkiPath::decrypted_secrets_path();
 
-        if sec_path.exists() {
+        let res = if sec_path.exists() {
             let sec_encrypted = std::fs::read(&sec_path).map_err(|e| e.to_string())?;
             let sec_json = decrypt_with_master_key(&sec_encrypted, &master_key)?;
             let secrets_map: HashMap<String, AccountSecret> = serde_json::from_slice(&sec_json).map_err(|e| e.to_string())?;
@@ -72,11 +75,23 @@ impl State {
             Ok("Plaintext Vault".to_string())
         } else {
             Err("Secrets file missing (neither .age nor .json found)".to_string())
+        };
+
+        if res.is_ok() {
+            self.master_key = Some(master_key);
         }
+        res
     }
 
     fn get_otp(&mut self, account_id: &str) -> Result<String, String> {
         self.check_ttl();
+        
+        if self.secrets.is_none() {
+            if let Some(key) = self.master_key.clone() {
+                let _ = self.unlock(key)?;
+            }
+        }
+
         let secrets = self.secrets.as_ref().ok_or("Agent is locked")?;
         let secret = secrets.get(account_id).ok_or("Account not found")?;
         
