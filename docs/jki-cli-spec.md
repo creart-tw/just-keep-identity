@@ -16,7 +16,11 @@
 
 ### **2.1 搜尋與 OTP 生成 (預設行為)**
 `jki [PATTERNS]... [INDEX]`
-*   **PATTERNS**: 關鍵字篩選（不分大小寫，模糊匹配）。
+*   **PATTERNS**: 多關鍵字篩選。
+    *   **邏輯**：每個關鍵字必須在 `Issuer` 或 `Account Name` 其中之一找到匹配。
+    *   **範例**：
+        *   `jki g li` -> 匹配 `[G]oogle` 的 `[li]chihwu` 帳號。
+        *   `jki gh` -> 匹配 `[G][i][t][h][u][b]`，但不會誤中 `[G]oogle-lic[h]ih`。
 *   **INDEX**: 當多個結果時，可指定數字選取。
 *   **旗標**:
     *   `-s, --stdout`: 直接在 stdout 印出 OTP（預設為複製到剪貼簿）。

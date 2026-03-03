@@ -107,7 +107,10 @@ pub fn fuzzy_match(pattern: &str, target: &str) -> bool {
     let target = target.to_lowercase();
     let mut target_chars = target.chars();
     for p in pattern.chars() {
-        if !target_chars.any(|t| t == p) { return false; }
+        match target_chars.by_ref().find(|&t| t == p) {
+            Some(_) => continue,
+            None => return false,
+        }
     }
     true
 }
@@ -115,8 +118,13 @@ pub fn fuzzy_match(pattern: &str, target: &str) -> bool {
 pub fn search_accounts(accounts: &[Account], patterns: &[String]) -> Vec<Account> {
     accounts.iter()
         .filter(|acc| {
-            let target_str = format!("{} {}", acc.issuer.as_deref().unwrap_or_default(), acc.name);
-            patterns.iter().all(|p| fuzzy_match(p, &target_str))
+            let issuer = acc.issuer.as_deref().unwrap_or_default();
+            let name = &acc.name;
+            
+            // AND 邏輯：每個關鍵字都必須在任一欄位中找到匹配
+            patterns.iter().all(|p| {
+                fuzzy_match(p, issuer) || fuzzy_match(p, name)
+            })
         })
         .cloned()
         .collect()
@@ -350,7 +358,7 @@ mod tests {
         let accounts = vec![
             Account {
                 id: "1".to_string(),
-                name: "Gmail".to_string(),
+                name: "lichihwu@gmail.com".to_string(),
                 issuer: Some("Google".to_string()),
                 account_type: AccountType::Standard,
                 secret: "".to_string(),
@@ -366,21 +374,31 @@ mod tests {
                 digits: 6,
                 algorithm: "SHA1".to_string(),
             },
+            Account {
+                id: "3".to_string(),
+                name: "lichih".to_string(),
+                issuer: Some("GitHub".to_string()),
+                account_type: AccountType::Standard,
+                secret: "".to_string(),
+                digits: 6,
+                algorithm: "SHA1".to_string(),
+            },
         ];
 
-        // Match Google
-        let results = search_accounts(&accounts, &vec!["goog".to_string()]);
+        // 1. 驗證 "gh" 只會匹配 GitHub，不會誤中 Google-lichih (Field Isolation)
+        let results = search_accounts(&accounts, &vec!["gh".to_string()]);
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].name, "Gmail");
+        assert_eq!(results[0].issuer.as_deref(), Some("GitHub"));
 
-        // Match multiple patterns
-        let results = search_accounts(&accounts, &vec!["g".to_string(), "mail".to_string()]);
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].name, "Gmail");
+        // 2. 驗證 "g li" AND 邏輯
+        // Google-lichihwu: g match Google, li match lichihwu (Match)
+        // GitHub-lichih: g match GitHub, li match lichih (Match)
+        let results = search_accounts(&accounts, &vec!["g".to_string(), "li".to_string()]);
+        assert_eq!(results.len(), 2);
 
-        // No match
-        let results = search_accounts(&accounts, &vec!["xyz".to_string()]);
-        assert_eq!(results.len(), 0);
+        // 3. 驗證 "li" 匹配兩個 (fuzzy 匹配成功)
+        let results = search_accounts(&accounts, &vec!["li".to_string()]);
+        assert_eq!(results.len(), 2);
     }
 
     #[test]

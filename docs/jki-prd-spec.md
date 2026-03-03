@@ -13,6 +13,10 @@
 2.  **透明度 (Transparency)**：任何具備副作用的初始化動作必須清晰回報狀態（Skipped/Created/Updated），嚴禁靜默成功。
 3.  **簡潔性 (Simplicity)**：遵循 Unix 哲學，Fail-fast 設計，不實作過度複雜的重試機制。
 
+#### **1.3 搜尋哲學：欄位隔離 (Field Isolation)**
+*   **物理邊界 (Physical Boundary)**：單一關鍵字 (Pattern) 必須完全落在「單一欄位」內（Issuer 或 Account Name）。嚴禁單一關鍵字跨越欄位邊界匹配（例如 `gh` 不能一半匹配 `[G]oogle` 一半匹配 `lic[h]ih`），以消除高密度資料下的雜訊。
+*   **多維交集 (Multi-pattern AND Logic)**：空格分隔的多個關鍵字採交集 (AND) 邏輯。例如 `jki g li` 表示「(關鍵字 g 存在於任一欄位) AND (關鍵字 li 存在於任一欄位)」。這能讓使用者透過極短的字元組合精準定位身份。
+
 ### ---
 
 **第二章：架構定義 (Architecture)**
