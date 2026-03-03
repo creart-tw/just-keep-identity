@@ -3,7 +3,7 @@ use jki_core::{
     agent::{Request, Response},
     generate_otp, paths::JkiPath,
     Account, AccountSecret, acquire_master_key, decrypt_with_master_key, search_accounts,
-    TerminalInteractor
+    TerminalInteractor, keychain::KeyringStore,
 };
 use interprocess::local_socket::LocalSocketStream;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -83,7 +83,7 @@ fn handle_agent_with_stream<S: Read + Write>(cmd: &AgentCommands, mut stream: S)
         AgentCommands::Ping => Request::Ping,
         AgentCommands::Unlock => {
             let interactor = TerminalInteractor;
-            let master_key = acquire_master_key(false, &interactor)?;
+            let master_key = acquire_master_key(false, &interactor, Some(&KeyringStore))?;
             use secrecy::ExposeSecret;
             Request::Unlock { master_key: master_key.expose_secret().clone() }
         }
@@ -257,7 +257,7 @@ fn run(cli: Cli) -> Result<(), i32> {
                             Response::Error(e) if e.contains("Agent is locked") => {
                                 if !cli.quiet { eprintln!("Agent is locked. Attempting to unlock..."); }
                                 let interactor = TerminalInteractor;
-                                if let Ok(master_key) = acquire_master_key(cli.interactive, &interactor) {
+                                if let Ok(master_key) = acquire_master_key(cli.interactive, &interactor, Some(&KeyringStore)) {
                                     use secrecy::ExposeSecret;
                                     let unlock_req = Request::Unlock { master_key: master_key.expose_secret().clone() };
                                     let mut s = reader.into_inner();
@@ -296,7 +296,7 @@ fn run(cli: Cli) -> Result<(), i32> {
         if !cli.quiet { eprintln!("Falling back to local decryption..."); }
         let sec_path = JkiPath::secrets_path();
         let interactor = TerminalInteractor;
-        let master_key = acquire_master_key(cli.interactive, &interactor).unwrap_or_else(|e| {
+        let master_key = acquire_master_key(cli.interactive, &interactor, Some(&KeyringStore)).unwrap_or_else(|e| {
             eprintln!("Authentication failed: {}", e);
             process::exit(101);
         });

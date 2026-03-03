@@ -7,9 +7,19 @@
 ## **1. 全域旗標 (Global Flags)**
 
 適用於所有 `jki` 與 `jkim` 指令：
-*   `-I, --interactive`: 強制互動模式。忽略磁碟上的 `master.key` 與 Agent 快取，直接開啟密碼輸入。
+*   `-I, --interactive`: 強制互動模式。忽略系統 Keychain、磁碟上的 `master.key` 與 Agent 快取，直接開啟密碼輸入。
 *   `-q, --quiet`: 安靜模式。抑制 stderr 的提示、進度訊息與非關鍵警告。
 *   `-d, --default`: 自動模式。對於所有具備建議偏好的詢問，自動套用系統推薦行為，不再進行互動詢問。
+
+---
+
+## **1.1 認證優先序 (Authentication Priority)**
+
+當指令需要解鎖金庫時，依序嘗試以下來源：
+1.  **Interactive**: 若開啟 `-I` 旗標，跳過所有儲存點，直接要求輸入。
+2.  **System Keychain**: 嘗試從 macOS Keychain 或 Windows Credential Manager 獲取 `jki:master_key`。
+3.  **Master Key File**: 檢查 `$JKI_HOME/master.key` (需具備 0600 權限)。
+4.  **Interactive Prompt**: 若上述皆不可用，開啟密碼輸入介面。
 
 ---
 
@@ -38,7 +48,15 @@
 
 ## **3. 管理中心：jkim**
 
-### **3.1 環境初始化 (init)**
+### **3.1 狀態檢查 (status)**
+`jkim status`
+*   檢查環境健康狀況，回報以下資訊：
+    *   **Master Key File**: 檢查檔案是否存在且具備 0600 安全權限。
+    *   **System Keychain**: 檢查系統 Keychain 中是否存有 `jki:master_key`。
+    *   **jki-agent**: 檢查背景 Agent 是否運行 (目前為 Placeholder)。
+    *   **Git Repository**: 檢查 Git 分支、工作目錄清潔度與遠端設定。
+
+### **3.2 環境初始化 (init)**
 `jkim init [--force]`
 *   **預設行為 (Transparent Init)**：檢查環境並回報狀態。若有衝突則提示警告。
 *   **旗標**:
@@ -46,9 +64,15 @@
 
 ### **3.2 金鑰管理 (master-key)**
 `jkim master-key <SUBCOMMAND>`
-*   `set [--force]`: 將 Master Key 寫入 `master.key` (0600)。
-*   `remove [--force]`: 刪除磁碟上的 `master.key`。
-*   `change [--commit]`: 重新加密金庫並變更金鑰。
+*   `set [--force] [--keychain]`:
+    *   將 Master Key 寫入 `master.key` (0600)。
+    *   `--keychain` (預設為 true)：同時將金鑰存入系統 Keychain (`jki:master_key`)。
+*   `remove [--force] [--keychain]`:
+    *   刪除磁碟上的 `master.key`。
+    *   `--keychain`：同時從系統 Keychain 移除金鑰。
+*   `change [--commit]`:
+    *   重新加密金庫並變更金鑰。
+    *   若系統 Keychain 中存有舊金鑰，將自動更新為新金鑰。
 
 ### **3.3 資料管理 (Vault Management)**
 *   `decrypt [-k, --keep] [--remove-key]`: 將金庫解密為明文 (`vault.secrets.json`)。

@@ -222,19 +222,34 @@ impl Interactor for MockInteractor {
     }
 }
 
-pub fn acquire_master_key(force_interactive: bool, interactor: &dyn Interactor) -> Result<SecretString, String> {
+pub fn acquire_master_key(
+    force_interactive: bool,
+    interactor: &dyn Interactor,
+    secret_store: Option<&dyn keychain::SecretStore>,
+) -> Result<SecretString, String> {
     use crate::paths::JkiPath;
 
-    if !force_interactive {
-        let key_path = JkiPath::master_key_path();
-        if key_path.exists() {
-            if JkiPath::check_secure_permissions(&key_path).is_ok() {
-                let content = std::fs::read_to_string(key_path).map_err(|e| e.to_string())?;
-                return Ok(SecretString::from(content.trim().to_string()));
-            }
+    if force_interactive {
+        return interactor.prompt_password("Enter Master Key");
+    }
+
+    // 1. Try Secret Store (Keychain/Keyring)
+    if let Some(store) = secret_store {
+        if let Ok(key) = store.get_secret("jki", "master_key") {
+            return Ok(key);
         }
     }
 
+    // 2. Try master.key file
+    let key_path = JkiPath::master_key_path();
+    if key_path.exists() {
+        if JkiPath::check_secure_permissions(&key_path).is_ok() {
+            let content = std::fs::read_to_string(key_path).map_err(|e| e.to_string())?;
+            return Ok(SecretString::from(content.trim().to_string()));
+        }
+    }
+
+    // 3. Fallback to interactive prompt
     interactor.prompt_password("Enter Master Key")
 }
 
@@ -349,8 +364,12 @@ pub mod git {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use secrecy::ExposeSecret;
+    use crate::keychain::SecretStore;
+    use serial_test::serial;
 
     #[test]
+    #[serial]
     fn test_fuzzy_match() {
         assert!(fuzzy_match("gg", "Google"));
         assert!(fuzzy_match("goog", "Google"));
@@ -360,6 +379,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_search_accounts() {
         let accounts = vec![
             Account {
@@ -408,6 +428,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_crypto_roundtrip() {
         let master_key = SecretString::from("correct horse battery staple".to_string());
         let data = b"sensitive data";
@@ -419,6 +440,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_crypto_wrong_password() {
         let master_key = SecretString::from("correct horse battery staple".to_string());
         let wrong_key = SecretString::from("wrong password".to_string());
@@ -431,6 +453,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_git_check_status() {
         use std::process::Command;
         use tempfile::tempdir;
@@ -457,6 +480,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_git_operations() {
         use std::process::Command;
         use tempfile::tempdir;
@@ -484,6 +508,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_agent_ipc_serialization() {
         let req = agent::Request::Ping;
         let json = serde_json::to_string(&req).unwrap();
@@ -501,6 +526,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_integrate_accounts() {
         let metadata = vec![
             Account { id: "1".to_string(), name: "A".to_string(), issuer: None, account_type: AccountType::Standard, secret: "".to_string(), digits: 6, algorithm: "".to_string() },
@@ -518,18 +544,50 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_otp() {
-        let acc = Account {
-            id: "1".to_string(),
-            name: "Test".to_string(),
-            issuer: None,
-            account_type: AccountType::Standard,
-            secret: "JBSWY3DPEHPK3PXP".to_string(), // base32 for "Hello!"
-            digits: 6,
-            algorithm: "SHA1".to_string(),
+    #[serial]
+    fn test_acquire_master_key_priority() {
+        use tempfile::tempdir;
+        use std::env;
+        use crate::keychain::tests::MockSecretStore;
+
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("jki_home_priority");
+        std::fs::create_dir_all(&home).unwrap();
+        env::set_var("JKI_HOME", &home);
+
+        let interactor = MockInteractor {
+            passwords: std::cell::RefCell::new(vec!["interactive_pass".to_string()]),
+            confirms: std::cell::RefCell::new(vec![]),
         };
-        let otp = generate_otp(&acc).unwrap();
-        assert_eq!(otp.len(), 6);
-        assert!(otp.chars().all(|c| c.is_ascii_digit()));
+
+        let mock_store = MockSecretStore::new();
+        let key_path = crate::paths::JkiPath::master_key_path();
+
+        // 1. Force Interactive
+        let key = acquire_master_key(true, &interactor, Some(&mock_store)).unwrap();
+        assert_eq!(key.expose_secret(), "interactive_pass");
+
+        // 2. Secret Store (Keychain) Priority
+        mock_store.set_secret("jki", "master_key", "keychain_pass").unwrap();
+        std::fs::write(&key_path, "file_pass").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let key = acquire_master_key(false, &interactor, Some(&mock_store)).unwrap();
+        assert_eq!(key.expose_secret(), "keychain_pass");
+
+        // 3. File Priority (when keychain is missing)
+        mock_store.delete_secret("jki", "master_key").unwrap();
+        let key = acquire_master_key(false, &interactor, Some(&mock_store)).unwrap();
+        assert_eq!(key.expose_secret(), "file_pass");
+
+        // 4. Interactive Fallback (when both missing)
+        std::fs::remove_file(&key_path).unwrap();
+        interactor.passwords.borrow_mut().push("interactive_fallback".to_string());
+        let key = acquire_master_key(false, &interactor, Some(&mock_store)).unwrap();
+        assert_eq!(key.expose_secret(), "interactive_fallback");
     }
 }

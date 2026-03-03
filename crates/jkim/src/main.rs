@@ -10,6 +10,7 @@ use jki_core::{
     import::parse_otpauth_uri,
     Interactor,
     TerminalInteractor,
+    keychain::{KeyringStore, SecretStore},
 };
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
@@ -90,12 +91,18 @@ enum MasterKeyCommands {
         /// Force overwrite without confirmation
         #[arg(short, long)]
         force: bool,
+        /// Store the key in the system keychain (default: true)
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        keychain: bool,
     },
     /// Delete the master key from disk
     Remove {
         /// Force removal without confirmation
         #[arg(short, long)]
         force: bool,
+        /// Remove the key from the system keychain
+        #[arg(long)]
+        keychain: bool,
     },
     /// Re-encrypt the vault with a new master key
     Change {
@@ -120,8 +127,14 @@ fn handle_status() {
             Err(e) => println!("  - Master Key File : SECURITY ERROR ({})", e),
         }
     } else {
-        println!("  - Master Key File : Not found (Standalone mode disabled)");
+        println!("  - Master Key File : Not found");
     }
+
+    match KeyringStore.get_secret("jki", "master_key") {
+        Ok(_) => println!("  - System Keychain : Found (jki:master_key)"),
+        Err(_) => println!("  - System Keychain : Not found"),
+    }
+    
     println!("  - jki-agent       : Not checked (IPC placeholder)");
 
     println!("\n[Data & Synchronization]");
@@ -145,7 +158,7 @@ fn handle_master_key(cmd: &MasterKeyCommands, force_interactive: bool, default_f
     let sec_path = JkiPath::secrets_path();
 
     match cmd {
-        MasterKeyCommands::Set { force } => {
+        MasterKeyCommands::Set { force, keychain } => {
             if !*force && key_path.exists() {
                 if !default_flag && !interactor.confirm(&format!("Warning: master.key already exists at {:?}", key_path), false) { return; }
             }
@@ -162,6 +175,7 @@ fn handle_master_key(cmd: &MasterKeyCommands, force_interactive: bool, default_f
                 return;
             }
 
+            // Save to file
             fs::write(&key_path, p1.expose_secret()).expect("Failed to write key");
             #[cfg(unix)]
             {
@@ -169,21 +183,42 @@ fn handle_master_key(cmd: &MasterKeyCommands, force_interactive: bool, default_f
                 fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).unwrap();
             }
             println!("Master Key saved to {:?}", key_path);
+
+            // Save to keychain
+            if *keychain {
+                if let Err(e) = KeyringStore.set_secret("jki", "master_key", p1.expose_secret()) {
+                    eprintln!("Warning: Failed to save to system keychain: {}", e);
+                } else {
+                    println!("Master Key saved to system keychain.");
+                }
+            }
         }
-        MasterKeyCommands::Remove { force } => {
-            if !key_path.exists() {
-                eprintln!("Error: master.key not found.");
-                return;
+        MasterKeyCommands::Remove { force, keychain } => {
+            let mut removed = false;
+            if key_path.exists() {
+                if !*force {
+                    if !default_flag && !interactor.confirm("Warning: Removing master.key from disk. Are you sure?", false) { return; }
+                }
+                fs::remove_file(&key_path).expect("Failed to remove key");
+                println!("Master Key removed from disk.");
+                removed = true;
             }
-            if !*force {
-                if !default_flag && !interactor.confirm("Warning: Removing master.key means you will need to input it manually for every 'jki' command. Are you sure?", false) { return; }
+
+            if *keychain {
+                if !*force && !removed {
+                    if !default_flag && !interactor.confirm("Warning: Removing master_key from system keychain. Are you sure?", false) { return; }
+                }
+                if let Err(e) = KeyringStore.delete_secret("jki", "master_key") {
+                    eprintln!("Warning: Failed to remove from system keychain: {}", e);
+                } else {
+                    println!("Master Key removed from system keychain.");
+                }
             }
-            fs::remove_file(&key_path).expect("Failed to remove key");
-            println!("Master Key removed.");
         }
         MasterKeyCommands::Change { commit } => {
             // 1. Try to get current key to decrypt
-            let mut current_key = acquire_master_key(force_interactive, interactor).unwrap_or_else(|_| interactor.prompt_password("Enter current Master Key").expect("Input failed"));
+            let mut current_key = acquire_master_key(force_interactive, interactor, Some(&KeyringStore))
+                .unwrap_or_else(|_| interactor.prompt_password("Enter current Master Key").expect("Input failed"));
             
             let mut secrets_data = None;
             if sec_path.exists() {
@@ -191,7 +226,7 @@ fn handle_master_key(cmd: &MasterKeyCommands, force_interactive: bool, default_f
                 match decrypt_with_master_key(&encrypted, &current_key) {
                     Ok(d) => secrets_data = Some(d),
                     Err(_) => {
-                        // If file-based key failed, try prompting once
+                        // If stored key failed, try prompting once
                         println!("Stored Master Key failed to decrypt vault.");
                         current_key = interactor.prompt_password("Enter CORRECT current Master Key").expect("Input failed");
                         secrets_data = Some(decrypt_with_master_key(&encrypted, &current_key).expect("Authentication failed"));
@@ -213,7 +248,7 @@ fn handle_master_key(cmd: &MasterKeyCommands, force_interactive: bool, default_f
             let key_tmp = key_path.with_extension("tmp");
             let sec_tmp = sec_path.with_extension("tmp");
 
-            // Write new key
+            // Write new key to file
             fs::write(&key_tmp, p1.expose_secret()).expect("Failed to write temp key");
             #[cfg(unix)]
             {
@@ -230,6 +265,18 @@ fn handle_master_key(cmd: &MasterKeyCommands, force_interactive: bool, default_f
             // Atomic rename
             if sec_tmp.exists() { fs::rename(&sec_tmp, &sec_path).expect("Failed to replace secrets"); }
             fs::rename(&key_tmp, &key_path).expect("Failed to replace key");
+
+            // Update Keychain
+            if let Ok(_) = KeyringStore.get_secret("jki", "master_key") {
+                if let Err(e) = KeyringStore.set_secret("jki", "master_key", p1.expose_secret()) {
+                    eprintln!("Warning: Failed to update system keychain: {}", e);
+                } else {
+                    println!("Master Key updated in system keychain.");
+                }
+            } else {
+                 // If not in keychain, ask or just skip? Mission says set/remove has flags.
+                 // For Change, maybe we should keep consistency.
+            }
 
             println!("Master Key changed successfully.");
             if *commit {
@@ -369,7 +416,7 @@ fn handle_decrypt(force: bool, keep: bool, remove_key: bool, default_flag: bool,
         }
     }
 
-    let master_key = acquire_master_key(force_interactive, interactor).expect("Authentication failed");
+    let master_key = acquire_master_key(force_interactive, interactor, Some(&KeyringStore)).expect("Authentication failed");
     let encrypted = fs::read(&sec_path).expect("Failed to read secrets");
     let decrypted = decrypt_with_master_key(&encrypted, &master_key).expect("Decryption failed");
 
@@ -419,7 +466,7 @@ fn handle_encrypt(force: bool, default_flag: bool, force_interactive: bool, inte
         }
     }
 
-    let master_key = acquire_master_key(force_interactive, interactor).expect("Authentication failed");
+    let master_key = acquire_master_key(force_interactive, interactor, Some(&KeyringStore)).expect("Authentication failed");
     let decrypted = fs::read(&dec_path).expect("Failed to read plaintext secrets");
     let encrypted = encrypt_with_master_key(&decrypted, &master_key).expect("Encryption failed");
 
@@ -510,7 +557,7 @@ fn handle_import_winauth(file: &PathBuf, overwrite: bool, force_interactive: boo
 
     // 2. Acquire Master Key
     println!("Please unlock your vault to perform import.");
-    let master_key = acquire_master_key(force_interactive, interactor).unwrap_or_else(|e| {
+    let master_key = acquire_master_key(force_interactive, interactor, Some(&KeyringStore)).unwrap_or_else(|e| {
         eprintln!("Authentication failed: {}", e);
         std::process::exit(1);
     });
@@ -652,7 +699,7 @@ mod tests {
         env::set_var("JKI_HOME", &home);
         fs::create_dir_all(&home).unwrap();
 
-        let cmd = MasterKeyCommands::Set { force: false };
+        let cmd = MasterKeyCommands::Set { force: false, keychain: false };
         let interactor = MockInteractor {
             passwords: RefCell::new(vec!["newpass".to_string(), "newpass".to_string()]),
             confirms: RefCell::new(vec![]),
@@ -711,7 +758,7 @@ mod tests {
 
         fs::write(home.join("master.key"), "todelete").unwrap();
         
-        let cmd = MasterKeyCommands::Remove { force: true };
+        let cmd = MasterKeyCommands::Remove { force: true, keychain: false };
         let interactor = MockInteractor {
             passwords: RefCell::new(vec![]),
             confirms: RefCell::new(vec![]),

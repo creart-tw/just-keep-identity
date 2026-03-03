@@ -35,7 +35,7 @@ impl SecretStore for KeyringStore {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use secrecy::ExposeSecret;
     use std::collections::HashMap;
