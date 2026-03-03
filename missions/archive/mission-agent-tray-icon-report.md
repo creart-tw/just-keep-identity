@@ -10,6 +10,7 @@
 - `tray-icon`: 提供跨平台系統托盤支援。
 - `tao`: 輕量級視窗與事件循環庫（用於 macOS/Windows 渲染）。
 - `muda`: 跨平台選單建構庫。
+- `image`: 用於解析與解碼 PNG 圖標資產。
 
 ### 2.2 架構調整
 - **多執行緒運作**: 
@@ -19,8 +20,11 @@
     - 將 `jki-agent/src/main.rs` 中的 `State` 結構體及其欄位設為 `pub`，以便 `tray` 模組讀取金庫鎖定狀態。
 - **新增 Tray 模組**: 
     - 實作 `crates/jki-agent/src/tray.rs`，封裝選單建構、狀態更新與事件處理邏輯。
+- **資產嵌入**:
+    - 使用 `include_bytes!` 將 `crates/jki-agent/assets/icon.png` 直接嵌入二進制檔案，確保程式分發時不依賴外部路徑。
 
 ### 2.3 功能實作
+- **自定義圖標**: 成功載入並顯示位於 `assets/` 的 32x32 PNG 圖標。
 - **Status (選單頂部)**: 顯示 "Status: Locked" 或 "Status: Unlocked"，隨 Agent 內部的 `secrets` 狀態即時變動。
 - **Lock (選單項)**: 點擊後會清除內存中的機密 (secrets, master_key, last_unlocked)，達成物理上鎖。
 - **Quit (選單項)**: 正常關閉事件循環並終止程序。
@@ -30,16 +34,17 @@
 
 ### 3.1 編譯驗證
 - 執行 `cargo check -p jki-agent` 通過。
-- 修正了 `event_loop` 可變性錯誤與 Unused Imports。
+- 修正了 `event_loop` 可變性錯誤、Unused Imports 與 Dead Code 警告。
 
 ### 3.2 功能測試
 - 執行 `cargo test -p jki-agent` 通過（共 7 個測試），確保 Socket 通訊與加解密核心邏輯未受影響。
-- 手動驗證邏輯：Event Loop 正確接收 `MenuEvent` 並觸發相應的狀態變更。
+- 手動驗證邏輯：在 macOS 選單列上正確顯示自定義圖標，且選單互動（Lock/Quit）正常。
 
 ## 4. 交付物 (Deliverables)
 - `crates/jki-agent/Cargo.toml` (更新依賴)
 - `crates/jki-agent/src/main.rs` (重構主邏輯)
-- `crates/jki-agent/src/tray.rs` (新增選單實作)
+- `crates/jki-agent/src/tray.rs` (新增選單與資產載入實作)
+- `crates/jki-agent/assets/icon.png` (系統列圖標資產)
 
 ---
 *Status: Completed. Verified on macOS.*

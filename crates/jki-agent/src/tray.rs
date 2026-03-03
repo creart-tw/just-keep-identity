@@ -75,7 +75,14 @@ impl TrayHandler {
 }
 
 fn load_icon() -> tray_icon::Icon {
-    // Return a dummy icon (1x1 transparent pixel) to satisfy the API
-    let rgba = vec![0, 0, 0, 0];
-    tray_icon::Icon::from_rgba(rgba, 1, 1).unwrap()
+    // Load embedded PNG data
+    let icon_bytes = include_bytes!("../assets/icon.png");
+    let image = image::load_from_memory(icon_bytes)
+        .expect("Failed to load icon from assets/icon.png")
+        .into_rgba8();
+    
+    let (width, height) = image.dimensions();
+    let rgba = image.into_raw();
+    
+    tray_icon::Icon::from_rgba(rgba, width, height).unwrap()
 }
