@@ -16,6 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+mod tray;
+
 #[derive(Parser, Debug)]
 #[command(author, version, about = "jki-agent - Just Keep Identity Agent", long_about = None)]
 struct Args {
@@ -24,12 +26,12 @@ struct Args {
     auth: AuthSource,
 }
 
-struct State {
-    secrets: Option<HashMap<String, AccountSecret>>,
-    master_key: Option<secrecy::SecretString>,
-    last_unlocked: Option<Instant>,
-    ttl: Duration,
-    auth: AuthSource,
+pub struct State {
+    pub secrets: Option<HashMap<String, AccountSecret>>,
+    pub master_key: Option<secrecy::SecretString>,
+    pub last_unlocked: Option<Instant>,
+    pub ttl: Duration,
+    pub auth: AuthSource,
 }
 
 impl State {
@@ -136,7 +138,7 @@ fn main() -> io::Result<()> {
     }
 
     let socket_path = JkiPath::agent_socket_path();
-    let name = socket_path.to_str().unwrap();
+    let name = socket_path.to_str().unwrap().to_string();
 
     // Pre-flight check
     if auth != AuthSource::Auto && auth != AuthSource::Plaintext && !JkiPath::secrets_path().exists() {
@@ -153,27 +155,64 @@ fn main() -> io::Result<()> {
         let _ = std::fs::remove_file(&socket_path);
     }
 
-    let listener = LocalSocketListener::bind(name)?;
-    println!("jki-agent listening on {:?} (auth: {:?})", socket_path, auth);
+    println!("jki-agent starting (auth: {:?})", auth);
 
     let state = Arc::new(Mutex::new(State::new(auth)));
+    let state_clone = Arc::clone(&state);
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(s) => {
-                let state = Arc::clone(&state);
-                thread::spawn(move || {
-                    if let Err(e) = handle_client(s, state) {
-                        eprintln!("Error handling client: {}", e);
-                    }
-                });
-            }
-            Err(e) => {
-                eprintln!("Error accepting connection: {}", e);
+    // Socket listener thread
+    thread::spawn(move || {
+        let listener = LocalSocketListener::bind(name).expect("Failed to bind socket");
+        println!("jki-agent listening on {:?}", JkiPath::agent_socket_path());
+        for stream in listener.incoming() {
+            match stream {
+                Ok(s) => {
+                    let st = Arc::clone(&state_clone);
+                    thread::spawn(move || {
+                        if let Err(e) = handle_client(s, st) {
+                            eprintln!("Error handling client: {}", e);
+                        }
+                    });
+                }
+                Err(e) => {
+                    eprintln!("Error accepting connection: {}", e);
+                }
             }
         }
+    });
+
+    // Tray UI Event Loop
+    use tao::event_loop::{ControlFlow, EventLoop};
+    use tao::event::Event;
+    use muda::MenuEvent;
+
+    let mut event_loop = EventLoop::new();
+
+    #[cfg(target_os = "macos")]
+    {
+        use tao::platform::macos::EventLoopExtMacOS;
+        event_loop.set_activation_policy(tao::platform::macos::ActivationPolicy::Accessory);
     }
-    Ok(())
+
+    let (tray_handler, _menu) = tray::TrayHandler::new();
+
+    event_loop.run(move |event, _, control_flow| {
+        *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(500));
+
+        match event {
+            Event::NewEvents(_) => {
+                let s = state.lock().unwrap();
+                tray_handler.update_status(&s);
+            }
+            _ => (),
+        }
+
+        if let Ok(event) = MenuEvent::receiver().try_recv() {
+            if tray_handler.handle_menu_event(event, Arc::clone(&state)) {
+                *control_flow = ControlFlow::Exit;
+            }
+        }
+    });
 }
 
 fn handle_client(stream: interprocess::local_socket::LocalSocketStream, state: Arc<Mutex<State>>) -> io::Result<()> {
