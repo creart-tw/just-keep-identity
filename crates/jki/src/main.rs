@@ -119,6 +119,82 @@ fn handle_otp_output(otp: String, label: String, source: &str, stdout_flag: bool
     }
 }
 
+fn resolve_target(
+    patterns: &[String],
+    has_double_dash: bool,
+    accounts: &[Account],
+    list_mode: bool,
+    quiet: bool,
+) -> (Vec<Account>, Option<Account>) {
+    if has_double_dash {
+        // Double Dash Protection: Treat everything in patterns as fuzzy search terms
+        let results = if patterns.is_empty() {
+            accounts.to_vec()
+        } else {
+            search_accounts(accounts, patterns)
+        };
+        let target = if results.len() == 1 && !list_mode { Some(results[0].clone()) } else { None };
+        (results, target)
+    } else {
+        // Smart Indexing logic
+        let search_terms = patterns.to_vec();
+        let index_candidate = if !search_terms.is_empty() {
+            let last = search_terms.last().unwrap();
+            if last.chars().all(|c| c.is_ascii_digit()) {
+                last.parse::<usize>().ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        match index_candidate {
+            Some(idx) => {
+                let mut terms_without_idx = search_terms.clone();
+                terms_without_idx.pop();
+                
+                let results_without_idx = if terms_without_idx.is_empty() {
+                    accounts.to_vec()
+                } else {
+                    search_accounts(accounts, &terms_without_idx)
+                };
+
+                if idx >= 1 && idx <= results_without_idx.len() {
+                    // Valid index
+                    // Conflict Pre-check: If user typed "jki 14", check if "14" also matches something else
+                    if terms_without_idx.is_empty() {
+                        let pattern_matches = search_accounts(accounts, patterns);
+                        if !pattern_matches.is_empty() && !quiet {
+                            eprintln!("Note: Pattern matches found. Use 'jki -- {}' to search instead.", patterns[0]);
+                        }
+                    }
+                    (results_without_idx.clone(), Some(results_without_idx[idx - 1].clone()))
+                } else {
+                    // Index out of range, fallback to full pattern search
+                    let results = if patterns.is_empty() {
+                        accounts.to_vec()
+                    } else {
+                        search_accounts(accounts, patterns)
+                    };
+                    let target = if results.len() == 1 && !list_mode { Some(results[0].clone()) } else { None };
+                    (results, target)
+                }
+            }
+            None => {
+                // No index candidate, standard pattern search
+                let results = if patterns.is_empty() {
+                    accounts.to_vec()
+                } else {
+                    search_accounts(accounts, patterns)
+                };
+                let target = if results.len() == 1 && !list_mode { Some(results[0].clone()) } else { None };
+                (results, target)
+            }
+        }
+    }
+}
+
 fn run(cli: Cli) -> Result<(), i32> {
     let mut auth = cli.auth;
     if cli.interactive {
@@ -151,28 +227,24 @@ fn run(cli: Cli) -> Result<(), i32> {
     let meta_content = fs::read_to_string(&meta_path).expect("Failed to read metadata");
     let meta_data: MetadataFile = serde_json::from_str(&meta_content).expect("Metadata parse error");
 
-    let mut search_terms = patterns;
-    let mut index_selection: Option<usize> = None;
-    if search_terms.len() > 1 && search_terms.last().unwrap().chars().all(|c| c.is_ascii_digit()) {
-        index_selection = search_terms.pop().and_then(|s| s.parse().ok());
-    }
+    let raw_args: Vec<String> = std::env::args().collect();
+    let has_double_dash = raw_args.iter().any(|arg| arg == "--");
 
-    let initial_results = if search_terms.is_empty() {
-        meta_data.accounts.clone()
-    } else {
-        search_accounts(&meta_data.accounts, &search_terms)
-    };
+    let (initial_results, target_acc) = resolve_target(
+        &patterns,
+        has_double_dash,
+        &meta_data.accounts,
+        cli.list,
+        cli.quiet,
+    );
 
     if initial_results.is_empty() {
         if !cli.quiet { eprintln!("No matches found."); }
         return Err(1);
     }
 
-    let target_acc = if initial_results.len() == 1 && !cli.list {
-        Some(&initial_results[0])
-    } else if let Some(idx) = index_selection {
-        if idx >= 1 && idx <= initial_results.len() { Some(&initial_results[idx - 1]) }
-        else { return Err(2); }
+    let acc_ref = if let Some(ref acc) = target_acc {
+        Some(acc)
     } else {
         if !cli.quiet { eprintln!("{}:", if cli.list { "Matches" } else { "Ambiguous results" }); }
         for (i, acc) in initial_results.iter().enumerate() {
@@ -181,7 +253,7 @@ fn run(cli: Cli) -> Result<(), i32> {
         return Err(2);
     };
 
-    if let Some(acc) = target_acc {
+    if let Some(acc) = acc_ref {
         let label = format!("{}{}", acc.issuer.as_deref().map(|s| format!("[{}] ", s)).unwrap_or_default(), acc.name);
         
         // 1. Plaintext Path: Check vault.secrets.json (Explicitly requested or Auto)
@@ -553,5 +625,56 @@ mod tests {
         
         let result = run(cli);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_resolve_target_index_simple() {
+        let accs = vec![
+            Account { id: "1".into(), name: "A".into(), issuer: None, account_type: AccountType::Standard, secret: "".into(), digits: 6, algorithm: "SHA1".into() },
+            Account { id: "2".into(), name: "B".into(), issuer: None, account_type: AccountType::Standard, secret: "".into(), digits: 6, algorithm: "SHA1".into() },
+        ];
+        let (results, target) = resolve_target(&["1".to_string()], false, &accs, false, true);
+        assert_eq!(target.unwrap().id, "1");
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_resolve_target_double_dash() {
+        let accs = vec![
+            Account { id: "1".into(), name: "10".into(), issuer: None, account_type: AccountType::Standard, secret: "".into(), digits: 6, algorithm: "SHA1".into() },
+            Account { id: "2".into(), name: "B".into(), issuer: None, account_type: AccountType::Standard, secret: "".into(), digits: 6, algorithm: "SHA1".into() },
+        ];
+        // With double dash, "1" should be a pattern search, matching "10"
+        let (results, target) = resolve_target(&["1".to_string()], true, &accs, false, true);
+        assert_eq!(target.unwrap().name, "10");
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_resolve_target_pattern_plus_index() {
+        let accs = vec![
+            Account { id: "1".into(), name: "Google:A".into(), issuer: Some("Google".into()), account_type: AccountType::Standard, secret: "".into(), digits: 6, algorithm: "SHA1".into() },
+            Account { id: "2".into(), name: "Google:B".into(), issuer: Some("Google".into()), account_type: AccountType::Standard, secret: "".into(), digits: 6, algorithm: "SHA1".into() },
+            Account { id: "3".into(), name: "Other".into(), issuer: None, account_type: AccountType::Standard, secret: "".into(), digits: 6, algorithm: "SHA1".into() },
+        ];
+        let (results, target) = resolve_target(&["google".to_string(), "2".to_string()], false, &accs, false, true);
+        assert_eq!(target.unwrap().id, "2");
+        assert_eq!(results.len(), 2); // Results of "google"
+    }
+
+    #[test]
+    fn test_resolve_target_index_out_of_range_fallback() {
+        let accs = vec![
+            Account { id: "1".into(), name: "999".into(), issuer: None, account_type: AccountType::Standard, secret: "".into(), digits: 6, algorithm: "SHA1".into() },
+        ];
+        // Index 2 is out of range (only 1 account), so fallback to search "2".
+        // If "2" matches nothing, results is empty.
+        let (_results, target) = resolve_target(&["2".to_string()], false, &accs, false, true);
+        assert!(target.is_none());
+        assert!(_results.is_empty());
+
+        // fallback to search "999"
+        let (_results, target) = resolve_target(&["999".to_string()], false, &accs, false, true);
+        assert_eq!(target.unwrap().name, "999");
     }
 }
