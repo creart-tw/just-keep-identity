@@ -43,7 +43,26 @@
 `jkim status`
 *   檢查金鑰檔案權限、系統 Keychain 紀錄、Agent 運行狀態及 Git 同步狀況。
 
-### **3.2 環境初始化 (init)**
+### **3.2 代理服務管理 (agent)**
+`jkim agent <SUBCOMMAND>`
+*   `start`: 啟動背景 `jki-agent`。採用 Detach 模式，啟動後脫離終端進程組。
+*   `stop`: 優雅關閉正在運行的 `jki-agent`。
+*   `restart`: 重啟代理服務。
+
+### **3.3 環境初始化 (init)**
+...
+(後續不變)
+
+---
+
+## **附錄 B：代理服務啟動政策 (Agent Lifecycle Policy)**
+
+為維護系統紀律與最小驚訝原則，`jki` 遵循以下政策：
+1.  **禁止自動啟動**：`jki` 查詢指令絕對禁止在 Agent 未運行時主動啟動進程。
+2.  **被動解鎖 (Passive Unlock)**：若 `jki-agent` 已在運行但處於 Locked 狀態，`jki` 獲得 Master Key 後應嘗試請求 Agent 解鎖 (Lazy Unlock)。
+3.  **顯式啟動**：使用者必須透過 `jkim agent start` 或 OS 層級的啟動項顯式開啟服務。
+4.  **引導提示**：若 `jki` 執行時未偵測到 Agent，應在 stderr 顯示輕量級建議 (Tip)。
+
 `jkim init [--force]`
 *   初始化 JKI 工作目錄與 Git 儲存庫。使用 `-f` 可執行物理重置。
 

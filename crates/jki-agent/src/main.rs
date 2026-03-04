@@ -187,6 +187,9 @@ fn main() -> io::Result<()> {
     let state = Arc::new(Mutex::new(State::new(auth)));
     let state_clone = Arc::clone(&state);
 
+    let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
+    let shutdown_tx_clone = shutdown_tx.clone();
+
     if auth == AuthSource::Biometric {
         let mut s = state.lock().unwrap();
         match s.unlock_with_biometric() {
@@ -206,8 +209,9 @@ fn main() -> io::Result<()> {
             match stream {
                 Ok(s) => {
                     let st = Arc::clone(&state_clone);
+                    let tx = shutdown_tx_clone.clone();
                     thread::spawn(move || {
-                        if let Err(e) = handle_client(s, st) {
+                        if let Err(e) = handle_client(s, st, tx) {
                             eprintln!("Error handling client: {}", e);
                         }
                     });
@@ -237,6 +241,11 @@ fn main() -> io::Result<()> {
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(500));
 
+        if shutdown_rx.try_recv().is_ok() {
+            *control_flow = ControlFlow::Exit;
+            return;
+        }
+
         match event {
             Event::NewEvents(_) => {
                 let s = state.lock().unwrap();
@@ -253,11 +262,11 @@ fn main() -> io::Result<()> {
     });
 }
 
-fn handle_client(stream: interprocess::local_socket::LocalSocketStream, state: Arc<Mutex<State>>) -> io::Result<()> {
-    handle_client_io(stream, state)
+fn handle_client(stream: interprocess::local_socket::LocalSocketStream, state: Arc<Mutex<State>>, shutdown_tx: std::sync::mpsc::Sender<()>) -> io::Result<()> {
+    handle_client_io(stream, state, shutdown_tx)
 }
 
-fn handle_client_io<S: Read + Write>(stream: S, state: Arc<Mutex<State>>) -> io::Result<()> {
+fn handle_client_io<S: Read + Write>(stream: S, state: Arc<Mutex<State>>, shutdown_tx: std::sync::mpsc::Sender<()>) -> io::Result<()> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
 
@@ -283,6 +292,7 @@ fn handle_client_io<S: Read + Write>(stream: S, state: Arc<Mutex<State>>) -> io:
             }
         };
 
+        let mut should_shutdown = false;
         let resp = match req {
             Request::Ping => Response::Pong,
             Request::Unlock { master_key } => {
@@ -319,15 +329,25 @@ fn handle_client_io<S: Read + Write>(stream: S, state: Arc<Mutex<State>>) -> io:
                 s.secrets = None;
                 Response::Success
             }
+            Request::Shutdown => {
+                should_shutdown = true;
+                Response::Success
+            }
         };
 
         let resp_json = serde_json::to_string(&resp).unwrap();
         let s = reader.get_mut();
         s.write_all(format!("{}\n", resp_json).as_bytes())?;
         s.flush()?;
+
+        if should_shutdown {
+            let _ = shutdown_tx.send(());
+            break;
+        }
     }
     Ok(())
 }
+
 
 #[cfg(test)]
 mod tests {

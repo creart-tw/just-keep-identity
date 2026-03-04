@@ -3,7 +3,7 @@ use jki_core::{
     agent::AgentClient,
     generate_otp, paths::JkiPath,
     Account, AccountSecret, acquire_master_key, decrypt_with_master_key, search_accounts,
-    TerminalInteractor, keychain::KeyringStore, ensure_agent_running, AuthSource,
+    TerminalInteractor, keychain::KeyringStore, AuthSource,
 };
 use std::fs;
 use std::process;
@@ -62,26 +62,25 @@ struct MetadataFile {
     version: u32,
 }
 
-fn handle_agent(cmd: &AgentCommands, auth: AuthSource, quiet: bool) {
-    if !ensure_agent_running(quiet) {
-        eprintln!("Failed to start jki-agent.");
-        process::exit(1);
-    }
-
+fn handle_agent(cmd: &AgentCommands, _auth: AuthSource, _quiet: bool) {
     match cmd {
         AgentCommands::Ping => {
             if AgentClient::ping() { println!("Agent is alive (Pong)"); }
             else { 
-                eprintln!("Agent is not responding. Is jki-agent running?");
+                eprintln!("Agent is not responding. [Tip] Start it with 'jkim agent start'");
                 process::exit(1);
             }
         }
         AgentCommands::Unlock => {
-            let res = if auth == AuthSource::Biometric {
+            if !AgentClient::ping() {
+                eprintln!("Agent is not running. [Tip] Start it with 'jkim agent start'");
+                process::exit(1);
+            }
+            let res = if _auth == AuthSource::Biometric {
                 AgentClient::unlock_biometric()
             } else {
                 let interactor = TerminalInteractor;
-                match acquire_master_key(auth, &interactor, Some(&KeyringStore)) {
+                match acquire_master_key(_auth, &interactor, Some(&KeyringStore)) {
                     Ok(k) => AgentClient::unlock(&k),
                     Err(e) => { eprintln!("Authentication failed: {}", e); process::exit(1); }
                 }
@@ -93,6 +92,10 @@ fn handle_agent(cmd: &AgentCommands, auth: AuthSource, quiet: bool) {
             }
         }
         AgentCommands::Get { id } => {
+            if !AgentClient::ping() {
+                eprintln!("Agent is not running. [Tip] Start it with 'jkim agent start'");
+                process::exit(1);
+            }
             match AgentClient::get_otp(id) {
                 Ok(otp) => println!("{}", otp),
                 Err(e) => { eprintln!("Error: {}", e); process::exit(1); }
@@ -208,7 +211,7 @@ fn run(cli: Cli) -> Result<(), i32> {
 
         // 2. Agent Path: Connect to jki-agent (Explicitly requested or Auto)
         if auth == AuthSource::Agent || auth == AuthSource::Auto || auth == AuthSource::Biometric {
-            if ensure_agent_running(cli.quiet) {
+            if AgentClient::ping() {
                 match AgentClient::get_otp(&acc.id) {
                     Ok(otp) => {
                         handle_otp_output(otp, label, "Agent", stdout_flag, cli.quiet);
@@ -249,8 +252,10 @@ fn run(cli: Cli) -> Result<(), i32> {
                         if !cli.quiet { eprintln!("Error: Agent failed: {}", e); }
                     }
                 }
-            } else if auth != AuthSource::Auto {
-                eprintln!("Error: jki-agent could not be started.");
+            } else if auth == AuthSource::Agent || auth == AuthSource::Biometric {
+                if !cli.quiet {
+                    eprintln!("[Tip] Start jki-agent with 'jkim agent start' for faster lookups.");
+                }
                 return Err(1);
             }
         }
@@ -274,8 +279,8 @@ fn run(cli: Cli) -> Result<(), i32> {
                 }
             };
 
-            // Lazy Unlock: Sync to Agent (best effort)
-            if ensure_agent_running(true) {
+            // Passive Unlock: Sync to Agent ONLY if it is already running
+            if AgentClient::ping() {
                 let _ = AgentClient::unlock(&master_key);
             }
 

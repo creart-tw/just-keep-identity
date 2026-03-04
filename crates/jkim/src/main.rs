@@ -56,6 +56,9 @@ enum Commands {
     },
     /// Sync changes to Git (add, commit, pull --rebase, push)
     Sync,
+    /// Manage the jki-agent background process
+    #[command(subcommand)]
+    Agent(AgentCommands),
     /// Edit metadata manually using your default editor
     Edit,
     /// Decrypt the vault to plaintext JSON (for zero-latency mode)
@@ -98,6 +101,16 @@ enum Commands {
         /// Optional path for the export file
         output: Option<PathBuf>,
     },
+}
+
+#[derive(Subcommand)]
+enum AgentCommands {
+    /// Start the background agent
+    Start,
+    /// Stop the background agent
+    Stop,
+    /// Reload the agent (clear cached secrets)
+    Reload,
 }
 
 #[derive(Subcommand)]
@@ -220,6 +233,43 @@ fn handle_export(output: &Option<PathBuf>, auth: AuthSource, interactor: &dyn In
 
     zip.finish().expect("Failed to finalize ZIP");
     println!("Export completed successfully: {:?}", output_path);
+}
+
+fn handle_agent(cmd: &AgentCommands) {
+    use jki_core::agent::AgentClient;
+    match cmd {
+        AgentCommands::Start => {
+            if AgentClient::ping() {
+                println!("jki-agent is already running.");
+            } else {
+                if jki_core::ensure_agent_running(false) {
+                    println!("jki-agent started successfully.");
+                } else {
+                    eprintln!("Failed to start jki-agent.");
+                }
+            }
+        }
+        AgentCommands::Stop => {
+            if AgentClient::ping() {
+                match AgentClient::shutdown() {
+                    Ok(_) => println!("jki-agent shut down successfully."),
+                    Err(e) => eprintln!("Failed to shut down jki-agent: {}", e),
+                }
+            } else {
+                println!("jki-agent is not running.");
+            }
+        }
+        AgentCommands::Reload => {
+            if AgentClient::ping() {
+                match AgentClient::reload() {
+                    Ok(_) => println!("jki-agent reloaded."),
+                    Err(e) => eprintln!("Failed to reload jki-agent: {}", e),
+                }
+            } else {
+                println!("jki-agent is not running.");
+            }
+        }
+    }
 }
 
 fn handle_status() {
@@ -937,6 +987,7 @@ fn main() {
 
     match &cli.command {
         Commands::Status => handle_status(),
+        Commands::Agent(a) => handle_agent(a),
         Commands::Init { force } => handle_init(*force),
         Commands::Sync => handle_sync(cli.default, &interactor),
         Commands::Edit => handle_edit(),

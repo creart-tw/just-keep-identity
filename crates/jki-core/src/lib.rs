@@ -399,6 +399,7 @@ pub mod agent {
         GetOTP { account_id: String },
         GetMasterKey,
         Reload,
+        Shutdown,
     }
 
     #[derive(Serialize, Deserialize, Debug)]
@@ -436,6 +437,15 @@ pub mod agent {
             match Self::call(Request::Ping) {
                 Ok(Response::Pong) => true,
                 _ => false,
+            }
+        }
+
+        pub fn shutdown() -> Result<(), String> {
+            match Self::call(Request::Shutdown) {
+                Ok(Response::Success) => Ok(()),
+                Ok(Response::Error(e)) => Err(e),
+                Err(e) => Err(e),
+                _ => Err("Unexpected response".to_string()),
             }
         }
 
