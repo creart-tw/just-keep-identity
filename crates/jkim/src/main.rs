@@ -160,7 +160,7 @@ fn handle_export(output: &Option<PathBuf>, auth: AuthSource, interactor: &dyn In
     }
 
     // 1. Acquire Master Key
-    let master_key = acquire_master_key(auth, interactor, Some(&KeyringStore)).unwrap_or_else(|e| {
+    let master_key = acquire_master_key(auth, interactor, None).unwrap_or_else(|e| {
         eprintln!("Authentication failed: {}", e);
         std::process::exit(1);
     });
@@ -330,7 +330,7 @@ fn handle_master_key(cmd: &MasterKeyCommands, auth: AuthSource, default_flag: bo
         }
         MasterKeyCommands::Change { commit } => {
             // 1. Try to get current key to decrypt
-            let mut current_key = acquire_master_key(auth, interactor, Some(&KeyringStore))
+            let mut current_key = acquire_master_key(auth, interactor, None)
                 .unwrap_or_else(|_| interactor.prompt_password("Enter current Master Key").expect("Input failed"));
             
             let mut secrets_data = None;
@@ -635,7 +635,7 @@ fn handle_decrypt(force: bool, keep: bool, remove_key: bool, default_flag: bool,
         }
     }
 
-    let master_key = acquire_master_key(auth, interactor, Some(&KeyringStore)).expect("Authentication failed");
+    let master_key = acquire_master_key(auth, interactor, None).expect("Authentication failed");
     let encrypted = fs::read(&sec_path).expect("Failed to read secrets");
     let decrypted = decrypt_with_master_key(&encrypted, &master_key).expect("Decryption failed");
 
@@ -685,7 +685,7 @@ fn handle_encrypt(force: bool, default_flag: bool, auth: AuthSource, interactor:
         }
     }
 
-    let master_key = acquire_master_key(auth, interactor, Some(&KeyringStore)).expect("Authentication failed");
+    let master_key = acquire_master_key(auth, interactor, None).expect("Authentication failed");
     let decrypted = fs::read(&dec_path).expect("Failed to read plaintext secrets");
     let encrypted = encrypt_with_master_key(&decrypted, &master_key).expect("Encryption failed");
 
@@ -767,49 +767,61 @@ fn handle_import_winauth(file: &PathBuf, overwrite: bool, auth: AuthSource, defa
     let meta_path = JkiPath::metadata_path();
     let sec_path = JkiPath::secrets_path();
     let dec_path = JkiPath::decrypted_secrets_path();
-    let key_path = JkiPath::master_key_path();
 
     // 1. Detect State
-    let is_plaintext = dec_path.exists();
-    let is_encrypted = sec_path.exists();
-    let has_master_key = key_path.exists();
+    let has_meta = meta_path.exists();
+    let has_age = sec_path.exists();
+    let has_json = dec_path.exists();
 
-    // 2. Acquire Master Key
-    println!("Please unlock your vault to perform import.");
-    let master_key = acquire_master_key(auth, interactor, Some(&KeyringStore)).unwrap_or_else(|e| {
-        eprintln!("Authentication failed: {}", e);
+    // 1.1 Corruption Check
+    if has_meta && !has_age && !has_json {
+        eprintln!("Error: Vault corrupted: Metadata exists but secrets are missing.");
         std::process::exit(1);
-    });
+    }
+
+    // 2. Optional Authentication (Prohibit direct keychain call per PRD A.2.1)
+    let master_key = acquire_master_key(auth, interactor, None).ok();
 
     // 3. Load existing Metadata
-    let mut metadata = if meta_path.exists() {
+    let mut metadata = if has_meta {
         let content = fs::read_to_string(&meta_path).unwrap_or_default();
         serde_json::from_str::<MetadataFile>(&content).unwrap_or(MetadataFile { accounts: vec![], version: 1 })
     } else {
         MetadataFile { accounts: vec![], version: 1 }
     };
 
-    // 4. Load Secrets (Prefer Plaintext if it exists, otherwise Encrypted)
-    let mut secrets_map: HashMap<String, AccountSecret> = if is_plaintext {
-        let content = fs::read(&dec_path).expect("Failed to read plaintext secrets");
-        serde_json::from_slice(&content).expect("Failed to parse plaintext secrets")
-    } else if is_encrypted {
-        let encrypted = fs::read(&sec_path).expect("Failed to read secrets file");
-        match decrypt_with_master_key(&encrypted, &master_key) {
-            Ok(decrypted) => serde_json::from_slice(&decrypted).expect("Failed to parse existing secrets JSON"),
-            Err(e) => {
-                if force_new_vault {
-                    println!("\n[Warning] Decryption failed: {}. --force-new-vault is set, discarding existing data.", e);
-                    metadata = MetadataFile { accounts: vec![], version: 1 };
-                    HashMap::new()
-                } else {
-                    eprintln!("\n[Error] Master Key incorrect for the existing vault ({}).", e);
-                    std::process::exit(101);
+    // 4. Load Secrets based on state
+    let mut secrets_map: HashMap<String, AccountSecret> = match (has_age, has_json) {
+        (true, _) => {
+            // Encrypted State priority
+            let k = master_key.clone().unwrap_or_else(|| {
+                eprintln!("Authentication required for encrypted vault.");
+                std::process::exit(1);
+            });
+            let encrypted = fs::read(&sec_path).expect("Failed to read secrets file");
+            match decrypt_with_master_key(&encrypted, &k) {
+                Ok(decrypted) => serde_json::from_slice(&decrypted).expect("Failed to parse existing secrets JSON"),
+                Err(e) => {
+                    if force_new_vault {
+                        println!("\n[Warning] Decryption failed: {}. --force-new-vault is set, discarding existing data.", e);
+                        metadata = MetadataFile { accounts: vec![], version: 1 };
+                        HashMap::new()
+                    } else {
+                        eprintln!("\n[Error] Master Key incorrect for the existing vault ({}).", e);
+                        std::process::exit(101);
+                    }
                 }
             }
+        },
+        (false, true) => {
+            // Plaintext State
+            let content = fs::read(&dec_path).expect("Failed to read plaintext secrets");
+            serde_json::from_slice(&content).expect("Failed to parse plaintext secrets")
+        },
+        (false, false) => {
+            // Initial State
+            HashMap::new()
         }
-    } else {
-        HashMap::new()
     };
 
     // 5. Process Import
@@ -818,19 +830,26 @@ fn handle_import_winauth(file: &PathBuf, overwrite: bool, auth: AuthSource, defa
     let mut updated_count = 0;
     let mut skip_count = 0;
 
+    let mut secret_to_id: HashMap<String, String> = HashMap::new();
+    for (id, sec) in &secrets_map {
+        secret_to_id.insert(sec.secret.clone(), id.clone());
+    }
+
     for line in content.lines() {
         if let Some(mut acc) = parse_otpauth_uri(line) {
-            let existing_pos = metadata.accounts.iter().position(|m| m.name == acc.name && m.issuer == acc.issuer);
+            let existing_pos = metadata.accounts.iter().position(|m| m.name == acc.name && m.issuer == acc.issuer)
+                .or_else(|| {
+                    secret_to_id.get(&acc.secret).and_then(|id| {
+                        metadata.accounts.iter().position(|m| m.id == *id)
+                    })
+                });
             
             if let Some(pos) = existing_pos {
                 let id = metadata.accounts[pos].id.clone();
-                
                 if !overwrite {
                     skip_count += 1;
                     continue;
                 }
-                
-                // Update case
                 let entry = AccountSecret { secret: acc.secret.clone(), digits: acc.digits, algorithm: acc.algorithm.clone() };
                 acc.id = id.clone();
                 acc.secret = "".to_string();
@@ -838,44 +857,67 @@ fn handle_import_winauth(file: &PathBuf, overwrite: bool, auth: AuthSource, defa
                 secrets_map.insert(id, entry);
                 updated_count += 1;
             } else {
-                // Insert case
                 let id = acc.id.clone();
                 let entry = AccountSecret { secret: acc.secret.clone(), digits: acc.digits, algorithm: acc.algorithm.clone() };
+                acc.id = id.clone();
                 acc.secret = "".to_string();
+                if let Some(_) = secret_to_id.get(&entry.secret) {
+                     skip_count += 1;
+                     continue;
+                }
                 metadata.accounts.push(acc);
-                secrets_map.insert(id, entry);
+                secrets_map.insert(id.clone(), entry.clone());
+                secret_to_id.insert(entry.secret, id);
                 new_count += 1;
             }
         }
     }
 
-    // 6. Save back
+    // 6. Save back based on Decision Matrix
     let secrets_json = serde_json::to_vec(&secrets_map).unwrap();
-    
-    // Hybrid state logic: if master_key exists, always encrypt to .age
-    if has_master_key {
-        let mut should_seal = true;
-        if !default_flag && is_plaintext {
-            should_seal = interactor.confirm("Master Key exists. Encrypt and delete plaintext vault?", true);
-        }
-        
-        if should_seal {
-            let encrypted_data = encrypt_with_master_key(&secrets_json, &master_key).expect("Encryption failed");
+    match (has_age, has_json) {
+        (true, _) => {
+            // Maintain Encrypted (0 questions)
+            let k = master_key.expect("Already verified key above");
+            let encrypted_data = encrypt_with_master_key(&secrets_json, &k).expect("Encryption failed");
             fs::write(&sec_path, encrypted_data).unwrap();
-            if dec_path.exists() { let _ = fs::remove_file(&dec_path); }
-            if is_plaintext { println!("Vault encrypted and plaintext deleted."); }
-            else { println!("Saved to encrypted vault."); }
-        } else {
-            fs::write(&dec_path, &secrets_json).unwrap();
-            println!("Saved to plaintext vault as requested.");
+            println!("Saved to encrypted vault.");
+        },
+        (false, true) => {
+            // Plaintext State
+            if let Some(k) = master_key {
+                if !default_flag && interactor.confirm("Master Key detected. Upgrade to Encrypted? [y/N]", false) {
+                    let encrypted_data = encrypt_with_master_key(&secrets_json, &k).expect("Encryption failed");
+                    fs::write(&sec_path, encrypted_data).unwrap();
+                    fs::remove_file(&dec_path).ok();
+                    println!("Vault upgraded to encrypted and plaintext deleted.");
+                } else {
+                    fs::write(&dec_path, &secrets_json).unwrap();
+                    println!("Updated plaintext vault.");
+                }
+            } else {
+                // No key, maintain plain (0 questions)
+                fs::write(&dec_path, &secrets_json).unwrap();
+                println!("Updated plaintext vault.");
+            }
+        },
+        (false, false) => {
+            // Initial State
+            if let Some(k) = master_key {
+                // 0 questions, automatically protect
+                let encrypted_data = encrypt_with_master_key(&secrets_json, &k).expect("Encryption failed");
+                fs::write(&sec_path, encrypted_data).unwrap();
+                println!("Created encrypted vault.");
+            } else {
+                if !default_flag && interactor.confirm("No Key. Create as PLAINTEXT vault? [y/n]", false) {
+                    fs::write(&dec_path, &secrets_json).unwrap();
+                    println!("Created plaintext vault.");
+                } else {
+                    println!("Import cancelled (No Key provided and declined plaintext).");
+                    return;
+                }
+            }
         }
-    } else if is_plaintext {
-        fs::write(&dec_path, &secrets_json).unwrap();
-        println!("Saved to plaintext vault.");
-    } else {
-        let encrypted_data = encrypt_with_master_key(&secrets_json, &master_key).expect("Encryption failed");
-        fs::write(&sec_path, encrypted_data).unwrap();
-        println!("Saved to encrypted vault.");
     }
 
     fs::write(&meta_path, serde_json::to_string_pretty(&metadata).unwrap()).unwrap();
@@ -925,7 +967,7 @@ mod tests {
         env::set_var("JKI_HOME", &home);
         fs::create_dir_all(&home).unwrap();
 
-        let cmd = MasterKeyCommands::Set { force: false, keychain: false };
+        let cmd = MasterKeyCommands::Set { force: false, keychain: false, no_keychain: true };
         let interactor = MockInteractor {
             passwords: RefCell::new(vec!["newpass".to_string(), "newpass".to_string()]),
             confirms: RefCell::new(vec![]),
@@ -1062,6 +1104,72 @@ mod tests {
         assert_eq!(metadata.accounts.len(), 1);
         assert_eq!(metadata.accounts[0].name, "test@gmail.com");
         assert_eq!(metadata.accounts[0].issuer, Some("Google".to_string()));
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn test_import_hardening_logic() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("jki_home_hardening");
+        fs::create_dir_all(&home).unwrap();
+        env::set_var("JKI_HOME", &home);
+
+        let import_file = temp.path().join("winauth.txt");
+        fs::write(&import_file, "otpauth://totp/Google:test@gmail.com?secret=JBSWY3DPEHPK3PXP&issuer=Google\n").unwrap();
+
+        // --- Scenario 1: Initial State + Key -> 0 questions, create encrypted ---
+        let key_path = home.join("master.key");
+        fs::write(&key_path, "testpass").unwrap();
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).unwrap();
+        
+        let interactor = MockInteractor {
+            passwords: RefCell::new(vec![]),
+            confirms: RefCell::new(vec![]), // 0 questions expected
+        };
+        handle_import_winauth(&import_file, false, AuthSource::Auto, false, &interactor, false);
+        assert!(home.join("vault.secrets.bin.age").exists());
+        assert!(!home.join("vault.secrets.json").exists());
+        fs::remove_file(home.join("vault.secrets.bin.age")).unwrap();
+        fs::remove_file(home.join("vault.metadata.json")).unwrap();
+
+        // --- Scenario 2: Initial State + No Key -> Ask for plaintext ---
+        fs::remove_file(&key_path).unwrap();
+        let interactor = MockInteractor {
+            passwords: RefCell::new(vec![]),
+            confirms: RefCell::new(vec![true]), // Confirm plaintext
+        };
+        handle_import_winauth(&import_file, false, AuthSource::Auto, false, &interactor, false);
+        assert!(home.join("vault.secrets.json").exists());
+        assert!(!home.join("vault.secrets.bin.age").exists());
+
+        // --- Scenario 3: Plaintext State + No Key -> 0 questions, update plaintext ---
+        let interactor = MockInteractor {
+            passwords: RefCell::new(vec![]),
+            confirms: RefCell::new(vec![]), // 0 questions expected
+        };
+        handle_import_winauth(&import_file, true, AuthSource::Auto, false, &interactor, false);
+        assert!(home.join("vault.secrets.json").exists());
+
+        // --- Scenario 4: Plaintext State + Key -> Ask for upgrade ---
+        fs::write(&key_path, "testpass").unwrap();
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let interactor = MockInteractor {
+            passwords: RefCell::new(vec![]),
+            confirms: RefCell::new(vec![true]), // Confirm upgrade
+        };
+        handle_import_winauth(&import_file, true, AuthSource::Auto, false, &interactor, false);
+        assert!(home.join("vault.secrets.bin.age").exists());
+        assert!(!home.join("vault.secrets.json").exists());
+
+        // --- Scenario 5: Encrypted State -> 0 questions, update encrypted ---
+        let interactor = MockInteractor {
+            passwords: RefCell::new(vec![]),
+            confirms: RefCell::new(vec![]), // 0 questions expected
+        };
+        handle_import_winauth(&import_file, true, AuthSource::Auto, false, &interactor, false);
+        assert!(home.join("vault.secrets.bin.age").exists());
     }
 
     #[test]

@@ -1,3 +1,4 @@
+#[cfg(feature = "keychain")]
 use keyring::{Entry, Error as KeyringError};
 use secrecy::SecretString;
 
@@ -9,8 +10,10 @@ pub trait SecretStore {
 }
 
 /// Implementation of `SecretStore` using the system's native keychain via the `keyring` crate.
+#[cfg(feature = "keychain")]
 pub struct KeyringStore;
 
+#[cfg(feature = "keychain")]
 impl SecretStore for KeyringStore {
     fn set_secret(&self, service: &str, user: &str, secret: &str) -> Result<(), String> {
         #[cfg(target_os = "macos")]
@@ -72,6 +75,26 @@ impl SecretStore for KeyringStore {
     fn delete_secret(&self, service: &str, user: &str) -> Result<(), String> {
         let entry = Entry::new(service, user).map_err(|e| e.to_string())?;
         entry.delete_credential().map_err(|e| e.to_string())
+    }
+}
+
+/// Fallback implementation of `KeyringStore` when the `keychain` feature is disabled.
+/// This prevents build errors in lightweight binaries like `jki`.
+#[cfg(not(feature = "keychain"))]
+pub struct KeyringStore;
+
+#[cfg(not(feature = "keychain"))]
+impl SecretStore for KeyringStore {
+    fn set_secret(&self, _service: &str, _user: &str, _secret: &str) -> Result<(), String> {
+        Err("Keychain support not compiled in".to_string())
+    }
+
+    fn get_secret(&self, _service: &str, _user: &str) -> Result<SecretString, String> {
+        Err("Keychain support not compiled in".to_string())
+    }
+
+    fn delete_secret(&self, _service: &str, _user: &str) -> Result<(), String> {
+        Err("Keychain support not compiled in".to_string())
     }
 }
 

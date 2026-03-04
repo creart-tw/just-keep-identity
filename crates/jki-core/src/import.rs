@@ -21,8 +21,10 @@ pub fn parse_otpauth_uri(uri: &str) -> Option<Account> {
     let digits = query.get("digits").and_then(|d| d.parse::<u32>().ok()).unwrap_or(6);
     let issuer_query = query.get("issuer").cloned();
     
-    let issuer = issuer_raw.map(|s| urlencoding::decode(&s).ok().map(|d| d.into_owned())).flatten();
-    let name = urlencoding::decode(&name_raw).ok()?.into_owned();
+    let issuer = issuer_raw.and_then(|s| {
+        urlencoding::decode(&s.replace('+', " ")).ok().map(|d| d.into_owned())
+    });
+    let name = urlencoding::decode(&name_raw.replace('+', " ")).ok()?.into_owned();
 
     let effective_issuer = issuer.clone().or(issuer_query);
     let account_type = if effective_issuer.as_deref() == Some("Steam") {

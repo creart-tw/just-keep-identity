@@ -271,6 +271,7 @@ pub fn acquire_master_key(
             }
 
             // 2. Try Secret Store (Keychain/Keyring)
+            #[cfg(feature = "keychain")]
             if let Some(store) = secret_store {
                 if let Ok(key) = store.get_secret("jki", "master_key") {
                     return Ok(key);
@@ -308,14 +309,21 @@ pub fn acquire_master_key(
             Err("Keyfile auth failed: File missing".to_string())
         }
         AuthSource::Keychain => {
-            if let Some(store) = secret_store {
-                store.get_secret("jki", "master_key").map_err(|e| format!("Keychain auth failed: {}", e))
-            } else {
-                Err("Keychain auth failed: Store not provided".to_string())
+            #[cfg(feature = "keychain")]
+            {
+                if let Some(store) = secret_store {
+                    store.get_secret("jki", "master_key").map_err(|e| format!("Keychain auth failed: {}", e))
+                } else {
+                    Err("Keychain auth failed: Store not provided".to_string())
+                }
+            }
+            #[cfg(not(feature = "keychain"))]
+            {
+                Err("Keychain support not compiled in".to_string())
             }
         }
         AuthSource::Biometric => {
-            // For now, biometric is linked to agent which might trigger OS prompt
+            // For biometric, we always try agent first as it's the primary gateway.
             agent::AgentClient::get_master_key().map_err(|e| format!("Biometric (Agent) auth failed: {}", e))
         }
         AuthSource::Plaintext => {
