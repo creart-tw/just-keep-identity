@@ -1212,4 +1212,82 @@ mod tests {
         assert_eq!(updated_meta.version, 2);
         assert_eq!(updated_meta.accounts.len(), 1);
     }
+
+    #[test]
+    #[serial]
+    fn test_handle_export_success() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("jki_home_export");
+        env::set_var("JKI_HOME", &home);
+        fs::create_dir_all(&home).unwrap();
+
+        // 1. Setup metadata
+        let metadata = MetadataFile {
+            version: 1,
+            accounts: vec![Account {
+                id: "test-id".to_string(),
+                name: "test@gmail.com".to_string(),
+                issuer: Some("Google".to_string()),
+                account_type: AccountType::Standard,
+                secret: "".to_string(),
+                digits: 6,
+                algorithm: "SHA1".to_string(),
+            }]
+        };
+        fs::write(home.join("vault.metadata.json"), serde_json::to_string(&metadata).unwrap()).unwrap();
+
+        // 2. Setup secrets (Plaintext for simplicity in test)
+        let mut secrets_map = HashMap::new();
+        secrets_map.insert("test-id".to_string(), AccountSecret {
+            secret: "JBSWY3DPEHPK3PXP".to_string(),
+            digits: 6,
+            algorithm: "SHA1".to_string(),
+        });
+        fs::write(home.join("vault.secrets.json"), serde_json::to_vec(&secrets_map).unwrap()).unwrap();
+
+        // 3. Mock interactions (Master Key, then Export Password x2)
+        let interactor = MockInteractor {
+            passwords: RefCell::new(vec!["master_pass".to_string(), "zippass".to_string(), "zippass".to_string()]),
+            confirms: RefCell::new(vec![]),
+        };
+
+        let zip_path = temp.path().join("test_export.zip");
+        handle_export(&Some(zip_path.clone()), AuthSource::Interactive, &interactor).unwrap();
+
+        assert!(zip_path.exists());
+        
+        // 4. Verify ZIP content
+        let zip_file = fs::File::open(&zip_path).unwrap();
+        let mut archive = zip::ZipArchive::new(zip_file).unwrap();
+        assert_eq!(archive.len(), 1);
+        
+        let mut file = archive.by_index_decrypt(0, b"zippass").expect("Failed to decrypt or find file in ZIP");
+        assert_eq!(file.name(), "accounts.txt");
+        let mut content = String::new();
+        file.read_to_string(&mut content).unwrap();
+        assert!(content.contains("otpauth://totp/Google:test%40gmail.com"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_handle_export_password_mismatch() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("jki_home_export_fail");
+        env::set_var("JKI_HOME", &home);
+        fs::create_dir_all(&home).unwrap();
+
+        let metadata = MetadataFile { version: 1, accounts: vec![] };
+        fs::write(home.join("vault.metadata.json"), serde_json::to_string(&metadata).unwrap()).unwrap();
+        fs::write(home.join("vault.secrets.json"), b"{}").unwrap();
+
+        // Master Key, then Mismatched export passwords
+        let interactor = MockInteractor {
+            passwords: RefCell::new(vec!["master_pass".to_string(), "zippass".to_string(), "WRONGpass".to_string()]),
+            confirms: RefCell::new(vec![]),
+        };
+
+        let res = handle_export(&None, AuthSource::Interactive, &interactor);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("Passwords do not match"));
+    }
 }

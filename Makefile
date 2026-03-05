@@ -1,7 +1,7 @@
 # Load macOS signing variables if the file exists
 -include .env.macos
 
-.PHONY: all release install clean dev test-all cov snapshot snapshot-clean help bundle bundle-app bundle-icon
+.PHONY: all release install clean dev test-all cov cov-audit snapshot snapshot-clean help bundle bundle-app bundle-icon
 
 # Directories
 BIN_DIR = $(HOME)/.local/bin
@@ -36,7 +36,16 @@ test-all:
 
 ## cov: Run tests and generate coverage report (HTML)
 cov:
-	CARGO_TARGET_DIR=target/tarpaulin cargo tarpaulin --workspace --out Html --skip-clean
+	CARGO_TARGET_DIR=target/tarpaulin cargo tarpaulin --workspace --all-features --engine llvm --all-targets --out Html --skip-clean
+
+## cov-audit: Show uncovered line numbers using jq (Run 'make cov' first)
+cov-audit:
+	@if [ ! -f tarpaulin-report.json ]; then \
+		echo "Error: tarpaulin-report.json not found. Generating it now..."; \
+		CARGO_TARGET_DIR=target/tarpaulin cargo tarpaulin --workspace --all-features --engine llvm --all-targets --out Json --skip-clean --output-dir .; \
+	fi
+	@echo "--- Uncovered Lines Audit ---"
+	@jq -r '.files[] | {path: (.path | join("/")), uncovered: [.traces[] | select(.stats.Line == 0) | .line] | sort} | select(.uncovered | length > 0) | "\(.path): \(.uncovered | join(", "))"' tarpaulin-report.json
 
 ## snapshot: Create .stable snapshots for all Rust source files
 snapshot:
