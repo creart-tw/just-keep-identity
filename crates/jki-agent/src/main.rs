@@ -109,44 +109,6 @@ impl State {
         Ok(source.to_string())
     }
 
-    fn unlock_with_biometric(&mut self) -> anyhow::Result<String> {
-        use jki_core::keychain::{KeyringStore, SecretStore};
-        
-        let auth = match &self.vault {
-            VaultState::Locked(d) => d.auth,
-            VaultState::Unlocked(d) => d.auth,
-        };
-
-        let store = KeyringStore;
-        let master_key = store.get_secret("jki", "master_key")
-            .map_err(|e| anyhow!("Failed to retrieve master key from keychain: {}", e))?;
-            
-        let sec_path = JkiPath::secrets_path();
-        let decrypted_path = JkiPath::decrypted_secrets_path();
-
-        let (secrets_map, source) = if sec_path.exists() {
-            let sec_encrypted = std::fs::read(&sec_path).context("Failed to read encrypted vault")?;
-            let sec_json = decrypt_with_master_key(&sec_encrypted, &master_key).map_err(|e| anyhow!(e))?;
-            let map: HashMap<String, AccountSecret> = serde_json::from_slice(&sec_json).context("Failed to parse vault secrets")?;
-            (map, "Encrypted Vault")
-        } else if decrypted_path.exists() {
-            let sec_json = std::fs::read(&decrypted_path).context("Failed to read plaintext vault")?;
-            let map: HashMap<String, AccountSecret> = serde_json::from_slice(&sec_json).context("Failed to parse plaintext secrets")?;
-            (map, "Plaintext Vault")
-        } else {
-            return Err(anyhow!("Secrets file missing (neither .age nor .json found)"));
-        };
-
-        self.vault = VaultState::Unlocked(UnlockedData {
-            secrets: secrets_map,
-            master_key,
-            last_unlocked: Instant::now(),
-            auth,
-        });
-        
-        Ok(source.to_string())
-    }
-
     fn get_otp(&mut self, account_id: &str) -> anyhow::Result<String> {
         self.check_ttl();
         
@@ -217,11 +179,21 @@ fn main() -> anyhow::Result<()> {
     let shutdown_tx_clone = shutdown_tx.clone();
 
     if auth == AuthSource::Biometric {
-        let mut s = state.lock().map_err(|_| anyhow!("Failed to lock state"))?;
-        match s.unlock_with_biometric() {
-            Ok(src) => println!("Biometric unlock successful: {}", src),
+        use jki_core::keychain::{KeyringStore, SecretStore};
+        let store = KeyringStore;
+        match store.get_secret("jki", "master_key") {
+            Ok(key) => {
+                let mut s = state.lock().map_err(|_| anyhow!("Failed to lock state"))?;
+                match s.unlock(key) {
+                    Ok(src) => println!("Initial Biometric unlock successful: {}", src),
+                    Err(e) => {
+                        eprintln!("CRITICAL: Initial unlock failed: {}. Exit.", e);
+                        std::process::exit(1);
+                    }
+                }
+            },
             Err(e) => {
-                eprintln!("CRITICAL: Biometric unlock failed: {}. Exit.", e);
+                eprintln!("CRITICAL: Biometric (Keychain) access failed: {}. Exit.", e);
                 std::process::exit(1);
             }
         }
@@ -335,9 +307,16 @@ fn handle_client_io<S: Read + Write>(stream: S, state: Arc<Mutex<State>>, shutdo
                 }
             }
             Request::UnlockBiometric => {
-                let mut s = state.lock().unwrap();
-                match s.unlock_with_biometric() {
-                    Ok(source) => Response::Unlocked(source),
+                use jki_core::keychain::{KeyringStore, SecretStore};
+                let master_key_res = KeyringStore.get_secret("jki", "master_key");
+                match master_key_res {
+                    Ok(key) => {
+                        let mut s = state.lock().unwrap();
+                        match s.unlock(key) {
+                            Ok(source) => Response::Unlocked(source),
+                            Err(e) => Response::Error(format!("Unlock failed: {}", e)),
+                        }
+                    }
                     Err(e) => Response::Error(format!("Biometric unlock failed: {}", e)),
                 }
             }

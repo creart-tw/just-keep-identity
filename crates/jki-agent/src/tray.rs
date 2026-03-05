@@ -121,52 +121,81 @@ impl TrayHandler {
 
     pub fn handle_menu_event(&self, event: MenuEvent, state: Arc<Mutex<State>>) -> bool {
         if event.id == self.unlock_biometric_item.id() {
-            let mut s = state.lock().unwrap();
-            match s.unlock_with_biometric() {
-                Ok(_) => {
-                    let _ = Notification::new()
-                        .summary("JKI Agent")
-                        .body("Vault unlocked successfully via Biometric.")
-                        .show();
+            // 1. Heavy/Blocking operation outside the lock (System Biometric Prompt)
+            let master_key_res = KeyringStore.get_secret("jki", "master_key");
+            
+            match master_key_res {
+                Ok(master_key) => {
+                    // 2. Short critical section for atomic state update
+                    let unlock_res = {
+                        let mut s = state.lock().unwrap();
+                        s.unlock(master_key)
+                    };
+
+                    match unlock_res {
+                        Ok(_) => {
+                            let _ = Notification::new()
+                                .summary("JKI Agent")
+                                .body("Vault unlocked successfully via Biometric.")
+                                .show();
+                        },
+                        Err(e) => {
+                            let _ = Notification::new()
+                                .summary("Unlock Failed")
+                                .body(&format!("Error: {}", e))
+                                .show();
+                            eprintln!("Tray: Unlock failed: {}", e);
+                        }
+                    }
                 },
                 Err(e) => {
                     let err_msg = e.to_string();
-                    let body = if err_msg.contains("Secret not found") {
+                    let body = if err_msg.contains("Secret not found") || err_msg.contains("not found") {
                         "Keychain not configured. Please run: jkim master-key set --keychain"
+                    } else if err_msg.contains("User interaction is not allowed") || err_msg.contains("canceled") {
+                        "Biometric authentication was cancelled."
                     } else {
                         &err_msg
                     };
                     let _ = Notification::new()
-                        .summary("Unlock Failed")
+                        .summary("Biometric Failed")
                         .body(body)
                         .show();
-                    eprintln!("Tray: Biometric unlock failed: {}", e);
+                    eprintln!("Tray: Keychain access failed: {}", e);
                 }
             }
-            // Invalidate cache to re-check after attempt
+
+            // Invalidate cache to re-check status after attempt
             {
                 let mut check_guard = self.last_keychain_check.lock().unwrap();
                 check_guard.0 = Instant::now() - Duration::from_secs(60);
             }
+            
+            // Final UI update
+            let s = state.lock().unwrap();
             self.update_status(&s);
             false
         } else if event.id == self.lock_item.id() {
-            let mut s = state.lock().unwrap();
-            let auth = match &s.vault {
-                crate::VaultState::Locked(d) => d.auth,
-                crate::VaultState::Unlocked(d) => d.auth,
-            };
-            s.vault = crate::VaultState::Locked(crate::LockedData { auth });
-            self.update_status(&s);
+            {
+                let mut s = state.lock().unwrap();
+                let auth = match &s.vault {
+                    crate::VaultState::Locked(d) => d.auth,
+                    crate::VaultState::Unlocked(d) => d.auth,
+                };
+                s.vault = crate::VaultState::Locked(crate::LockedData { auth });
+                self.update_status(&s);
+            }
             println!("Tray: Vault locked and memory purged");
             false
         } else if event.id == self.reload_item.id() {
-            let mut s = state.lock().unwrap();
-            let auth = match &s.vault {
-                crate::VaultState::Locked(d) => d.auth,
-                crate::VaultState::Unlocked(d) => d.auth,
-            };
-            s.vault = crate::VaultState::Locked(crate::LockedData { auth });
+            {
+                let mut s = state.lock().unwrap();
+                let auth = match &s.vault {
+                    crate::VaultState::Locked(d) => d.auth,
+                    crate::VaultState::Unlocked(d) => d.auth,
+                };
+                s.vault = crate::VaultState::Locked(crate::LockedData { auth });
+            }
             println!("Tray: Refresh requested (cache cleared)");
             false
         } else if event.id == self.open_config_item.id() {
