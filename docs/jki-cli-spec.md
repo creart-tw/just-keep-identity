@@ -80,11 +80,20 @@
 
 ## **4. 輸出規範 (Output Standards)**
 
-### **4.1 訊息流向**
-*   **stderr**: 用於提示、警告、互動詢問與密碼輸入。
+### **4.1 訊息流向與狀態碼**
+*   **stderr**: 用於提示、警告、互動詢問、密碼輸入與**狀態引導 (Tips)**。
 *   **stdout**: 僅用於純淨的資料輸出（如 OTP、JSON）。
+*   **搜尋結果狀態**: 
+    *   **結果唯一 (Single Match)**: 執行動作 (Execute/List) 並以 Exit Code 0 退出。
+    *   **結果多於一項 (Multiple Matches)**: 列出清單 (List) 並以 Exit Code 0 退出。不視為錯誤。
+    *   **查無結果 (No Match)**: 提示訊息並以 Exit Code 1 報錯退出。
 
-### **4.2 衝突處理規範 (Conflict Handling)**
+### **4.2 輸出標籤 (Labels)**
+*   **`Accounts:`**: 使用 `jki` 或 `jki -l` 且未提供搜尋 Pattern 時的標題。
+*   **`Matches:`**: 有提供搜尋 Pattern 且搜尋結果不唯一，或強制使用 `-l` 時的標題。
+*   **`Ambiguous results:`**: 僅在有搜尋 Pattern 且結果不唯一，且**未**指定 `-l` 時，作為導引性標題。
+
+### **4.3 衝突處理規範 (Conflict Handling)**
 *   當發生「狀態衝突」（如同步衝突）時，強制使用者確認。支援 `-d, --default` 或 `-y, --yes` 套用系統推薦行為。
 
 ---
@@ -103,21 +112,23 @@
 
 為平衡操作速度與意圖精確性，`jki` 的參數解析遵循以下智慧決策流程：
 
-### **C.1 核心規則**
-1.  **Double Dash (`--`) 保護**：
-    *   位於 `--` 之後的所有參數（包括純數字）強制視為 **Fuzzy Pattern**。
-    *   範例：`jki -- 14` 搜尋名稱含 "14" 的帳號；`jki 14` 則優先選擇第 14 項。
-2.  **智慧序號 (Smart Index)**：
-    *   若最後一個參數為純數字且未受 `--` 保護，則視為 **潛在序號 (Candidate Index)**。
-    *   系統優先嘗試將該序號套用於「其餘參數」的搜尋結果。
+### **C.1 核心邏輯層次**
+1.  **過濾層 (Filter Chain)**:
+    *   **Pattern Filter**: 執行 Fuzzy 搜尋。
+    *   **Index Filter**: 若最後一個參數為純數字（且未受 `--` 保護），則從 Pattern 結果中選取對應項。
+    *   **Final Results**: 過濾鏈最終產出的結果集。
+2.  **動作層 (Action Selection)**:
+    *   **Execute**: 當結果唯一且未指定 `-l` 時，執行 OTP 生成。
+    *   **List**: 當結果不唯一，或明確指定 `-l` 時，僅印出 `Final Results` 清單。
 
 ### **C.2 決策矩陣 (Decision Matrix)**
 
-| 輸入模式 | 條件 | 最終行為 | 提示 (stderr) |
-| :--- | :--- | :--- | :--- |
-| `jki <IDX>` | `IDX` 有效且無 Pattern 衝突 | 直接選中 `IDX` | 無 |
-| `jki <IDX>` | `IDX` 有效但存在 Pattern 衝突 | 直接選中 `IDX` | `Note: Pattern matches found. Use 'jki -- <IDX>'...` |
-| `jki <IDX>` | `IDX` 超出帳號總數 | 降級為 Pattern 搜尋 | 無 |
-| `jki <P> <IDX>` | `IDX` 在搜尋 `P` 的結果內 | 選中該搜尋結果的第 `IDX` 項 | 無 |
-| `jki <P> <IDX>` | `IDX` 在搜尋 `P` 的結果內無效 | 降級為 `P` 與 `IDX` 的合併搜尋 | 無 |
-| `jki -- <ARGS>` | (不論) | 將 `ARGS` 全部視為搜尋模式 | 無 |
+| 輸入模式 | 過濾結果 | 是否帶 `-l` | 最終行為 | 輸出標題 |
+| :--- | :--- | :--- | :--- | :--- |
+| `jki` (無參數) | 全部帳號 | (不論) | 列出所有帳號 | `Accounts:` |
+| `jki <P>` | > 1 個結果 | 否 | 列出清單 + Tip | `Ambiguous results:` |
+| `jki <P>` | > 1 個結果 | 是 | 列出符合清單 | `Matches:` |
+| `jki <P> <IDX>` | 有效 (結果=1) | 否 | **執行** (Execute) | 無 |
+| `jki <P> <IDX>` | 有效 (結果=1) | 是 | 列出該單項 | `Matches:` |
+| `jki <P> <IDX>` | 無效 (IDX 超出) | (任何) | 降級為 P 與 IDX 合併搜尋 | `Matches:` |
+| `jki -- <ARGS>` | (不論) | (不論) | 強制將所有 ARGS 視為搜尋模式 | (依結果數) |

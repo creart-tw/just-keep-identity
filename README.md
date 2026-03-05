@@ -29,12 +29,28 @@
 # 查詢並複製 OTP (優先向 Agent 要，若無 Agent 則支援 master.key 或直接問密碼)
 jki github
 
+# 智慧過濾：搜尋 google 並直接選擇第 2 個結果
+jki google 2
+
+# 驗證過濾結果：列出搜尋結果而不執行
+jki google 2 -l
+
 # 快速同步金庫
 jkim sync
-
-# 進入編輯模式 (自動開啟 $EDITOR)
-jkim edit
 ```
 
+### 智慧過濾與選擇 (Smart Filtering & Selection)
+
+`jki` 遵循「過濾 (Filter) -> 動作 (Action)」的邏輯鏈，讓你在複雜的帳號清單中如魚得水：
+
+1.  **多重過濾**: `jki [PATTERNS]... [INDEX]`
+    *   `jki u`：列出所有符合 `u` 的帳號 (如 Uber, Uplay)。
+    *   `jki u 2`：直接獲取 `u` 搜尋結果中第 2 項的 OTP。
+2.  **清單模式 (`-l, --list`)**: 
+    *   任何時候加上 `-l` 都會將 `jki` 切換為「只列出、不執行」模式。
+    *   這對於在大量結果中確認索引號 (`INDEX`) 非常有用。
+3.  **無感報錯**: 搜尋結果不唯一時不再視為錯誤，而是優雅地列出候選清單並提示你如何精確選擇。
+
 ---
+
 *Built with ❤️ for those who live in the terminal.*

@@ -164,7 +164,10 @@ fn resolve_target(
                             eprintln!("Note: Pattern matches found. Use 'jki -- {}' to search instead.", patterns[0]);
                         }
                     }
-                    (results_without_idx.clone(), Some(results_without_idx[idx - 1].clone()))
+                    let selected = results_without_idx[idx - 1].clone();
+                    let results = vec![selected.clone()];
+                    let target = if !list_mode { Some(selected) } else { None };
+                    (results, target)
                 } else {
                     let results = if patterns.is_empty() {
                         accounts.to_vec()
@@ -239,11 +242,25 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     let acc_ref = if let Some(ref acc) = target_acc {
         Some(acc)
     } else {
-        if !cli.quiet { eprintln!("{}:", if cli.list { "Matches" } else { "Ambiguous results" }); }
-        for (i, acc) in initial_results.iter().enumerate() {
-            println!("{:2}) {}{}", i + 1, acc.issuer.as_deref().map(|s| format!("[{}] ", s)).unwrap_or_default(), acc.name);
+        if cli.list || patterns.is_empty() {
+            if !cli.quiet {
+                let header = if patterns.is_empty() { "Accounts" } else { "Matches" };
+                eprintln!("{}:", header);
+                for (i, acc) in initial_results.iter().enumerate() {
+                    println!("{:2}) {}{}", i + 1, acc.issuer.as_deref().map(|s| format!("[{}] ", s)).unwrap_or_default(), acc.name);
+                }
+            }
+            return Ok(());
         }
-        return Err(anyhow!("Ambiguous results"));
+
+        if !cli.quiet {
+            eprintln!("Ambiguous results (found {} matches):", initial_results.len());
+            for (i, acc) in initial_results.iter().enumerate() {
+                println!("{:2}) {}{}", i + 1, acc.issuer.as_deref().map(|s| format!("[{}] ", s)).unwrap_or_default(), acc.name);
+            }
+            eprintln!("\n[Tip] Be more specific, or use 'jki <pattern> <index>' to select.");
+        }
+        return Ok(());
     };
 
     if let Some(acc) = acc_ref {
