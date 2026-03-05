@@ -180,6 +180,7 @@ impl TrayHandler {
                 let mut s = state.lock().unwrap();
                 let auth = match &s.vault {
                     crate::VaultState::Locked(d) => d.auth,
+                    crate::VaultState::LockedPersistent(d) => d.auth,
                     crate::VaultState::Unlocked(d) => d.auth,
                 };
                 s.vault = crate::VaultState::Locked(crate::LockedData { auth });
@@ -192,6 +193,7 @@ impl TrayHandler {
                 let mut s = state.lock().unwrap();
                 let auth = match &s.vault {
                     crate::VaultState::Locked(d) => d.auth,
+                    crate::VaultState::LockedPersistent(d) => d.auth,
                     crate::VaultState::Unlocked(d) => d.auth,
                 };
                 s.vault = crate::VaultState::Locked(crate::LockedData { auth });

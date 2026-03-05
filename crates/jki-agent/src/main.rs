@@ -31,6 +31,11 @@ pub struct LockedData {
     pub auth: AuthSource,
 }
 
+pub struct LockedPersistentData {
+    pub master_key: secrecy::SecretString,
+    pub auth: AuthSource,
+}
+
 pub struct UnlockedData {
     pub secrets: HashMap<String, AccountSecret>,
     pub master_key: secrecy::SecretString,
@@ -40,6 +45,7 @@ pub struct UnlockedData {
 
 pub enum VaultState {
     Locked(LockedData),
+    LockedPersistent(LockedPersistentData),
     Unlocked(UnlockedData),
 }
 
@@ -60,8 +66,9 @@ impl State {
         if let VaultState::Unlocked(ref data) = self.vault {
             if data.last_unlocked.elapsed() > self.ttl {
                 let auth = data.auth;
-                println!("Session expired (TTL). Locking vault.");
-                self.vault = VaultState::Locked(LockedData { auth });
+                let master_key = data.master_key.clone();
+                println!("Session expired (TTL). Transitioning to LockedPersistent.");
+                self.vault = VaultState::LockedPersistent(LockedPersistentData { master_key, auth });
             }
         }
     }
@@ -69,7 +76,7 @@ impl State {
     pub fn account_count(&self) -> usize {
         match &self.vault {
             VaultState::Unlocked(data) => data.secrets.len(),
-            VaultState::Locked(_) => 0,
+            _ => 0,
         }
     }
 
@@ -80,6 +87,7 @@ impl State {
     fn unlock(&mut self, master_key: secrecy::SecretString) -> anyhow::Result<String> {
         let auth = match &self.vault {
             VaultState::Locked(d) => d.auth,
+            VaultState::LockedPersistent(d) => d.auth,
             VaultState::Unlocked(d) => d.auth,
         };
 
@@ -112,14 +120,15 @@ impl State {
     fn get_otp(&mut self, account_id: &str) -> anyhow::Result<String> {
         self.check_ttl();
         
-        // Passive re-unlock if we have the master_key but session expired
-        // This is now safer because we don't store master_key in Locked state anymore.
-        // Wait, if we want to support Passive Re-unlock, we might need a third state "LockedWithKey".
-        // For now, let's stick to strict Locked/Unlocked.
+        // Restore Passive Re-unlock logic
+        if let VaultState::LockedPersistent(ref data) = self.vault {
+            let key = data.master_key.clone();
+            let _ = self.unlock(key)?;
+        }
 
         let secrets = match &self.vault {
             VaultState::Unlocked(data) => &data.secrets,
-            VaultState::Locked(_) => return Err(anyhow!("Agent is locked")),
+            _ => return Err(anyhow!("Agent is locked")),
         };
 
         let secret = secrets.get(account_id).ok_or_else(|| anyhow!("Account not found"))?;
@@ -332,6 +341,7 @@ fn handle_client_io<S: Read + Write>(stream: S, state: Arc<Mutex<State>>, shutdo
                 let s = state.lock().unwrap();
                 match &s.vault {
                     VaultState::Unlocked(data) => Response::MasterKey(data.master_key.expose_secret().clone()),
+                    VaultState::LockedPersistent(data) => Response::MasterKey(data.master_key.expose_secret().clone()),
                     VaultState::Locked(_) => Response::Error("Agent is locked".to_string()),
                 }
             }
@@ -339,6 +349,7 @@ fn handle_client_io<S: Read + Write>(stream: S, state: Arc<Mutex<State>>, shutdo
                 let mut s = state.lock().unwrap();
                 let auth = match &s.vault {
                     VaultState::Locked(d) => d.auth,
+                    VaultState::LockedPersistent(d) => d.auth,
                     VaultState::Unlocked(d) => d.auth,
                 };
                 s.vault = VaultState::Locked(LockedData { auth });

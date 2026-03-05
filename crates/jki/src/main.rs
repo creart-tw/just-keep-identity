@@ -357,7 +357,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 fn main() {
     let cli = Cli::parse();
     if let Err(e) = run(cli) {
-        eprintln!("Error: {:?}", e);
+        eprintln!("Error: {}", e);
         process::exit(1);
     }
 }
