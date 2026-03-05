@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, CommandFactory};
 use jki_core::{
     paths::JkiPath, 
     git, 
@@ -100,6 +100,11 @@ enum Commands {
     Export {
         /// Optional path for the export file
         output: Option<PathBuf>,
+    },
+    /// Generate shell completions
+    Completions {
+        /// The shell to generate completions for
+        shell: clap_complete::Shell,
     },
 }
 
@@ -998,6 +1003,11 @@ fn main() {
         Commands::ImportWinauth { file, overwrite, force_new_vault } =>
             handle_import_winauth(file, *overwrite, auth, cli.default, &interactor, *force_new_vault),
         Commands::Export { output } => handle_export(output, auth, &interactor),
+        Commands::Completions { shell } => {
+            let mut cmd = Cli::command();
+            let bin_name = cmd.get_name().to_string();
+            clap_complete::generate(*shell, &mut cmd, bin_name, &mut std::io::stdout());
+        }
     }
 }
 #[cfg(test)]
