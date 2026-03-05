@@ -2,6 +2,7 @@
 /target
 Cargo.lock
 tarpaulin-report.html
+tarpaulin-report.json
 *.profraw
 
 # Binary Cache (as per PRD V19)

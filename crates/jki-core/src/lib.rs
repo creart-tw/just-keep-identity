@@ -787,6 +787,36 @@ mod tests {
         let decrypted = decrypt_with_master_key(&encrypted, &wrong_key);
         
         assert!(decrypted.is_err());
+        match decrypted.unwrap_err() {
+            JkiCoreError::Decrypt(_) => {},
+            e => panic!("Expected Decrypt error, got {:?}", e),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_crypto_decrypt_invalid_format() {
+        let key = SecretString::from("pass".to_string());
+        let res = decrypt_with_master_key(b"not an age file", &key);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("Decryption error"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_generate_otp_invalid_secret() {
+        let acc = Account {
+            id: "1".into(),
+            name: "test".into(),
+            issuer: None,
+            account_type: AccountType::Standard,
+            secret: "!!! INVALID BASE32 !!!".into(),
+            digits: 6,
+            algorithm: "SHA1".into(),
+        };
+        let res = generate_otp(&acc);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("OTP generation error"));
     }
 
     #[test]
@@ -853,6 +883,32 @@ mod tests {
         std::fs::write(repo_path.join("file2"), "conflict").unwrap();
         // Just verify the porcelain output logic doesn't crash
         let _ = git::get_conflicting_files(repo_path);
+    }
+
+    #[test]
+    #[serial]
+    fn test_git_error_paths() {
+        use tempfile::tempdir;
+        use std::process::Command;
+        let dir = tempdir().unwrap();
+        let repo_path = dir.path();
+
+        // 1. Git add on non-git dir
+        let res = git::add_all(repo_path);
+        assert!(res.is_err());
+
+        // 2. Git push on non-git dir
+        let res = git::push(repo_path);
+        assert!(res.is_err());
+
+        // 3. Pull rebase failure (no remote)
+        Command::new("git").args(["init"]).current_dir(repo_path).output().unwrap();
+        let res = git::pull_rebase(repo_path);
+        assert!(res.is_err());
+        match res.unwrap_err() {
+            JkiCoreError::Git(_) => {},
+            e => panic!("Expected Git error, got {:?}", e),
+        }
     }
 
     #[test]

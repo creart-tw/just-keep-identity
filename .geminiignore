@@ -4,5 +4,6 @@
 
 # Allow Gemini to read safety mirrors for diffing
 !*.stable
+!tarpaulin-report.json
 
 prototypes/
