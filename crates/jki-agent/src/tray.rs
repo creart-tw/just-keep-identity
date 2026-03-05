@@ -81,7 +81,7 @@ impl TrayHandler {
     }
 
     pub fn update_status(&self, state: &State) {
-        let is_unlocked = state.secrets.is_some();
+        let is_unlocked = state.is_unlocked();
         
         // 1. Update Dashboard
         if is_unlocked {
@@ -152,15 +152,21 @@ impl TrayHandler {
             false
         } else if event.id == self.lock_item.id() {
             let mut s = state.lock().unwrap();
-            s.secrets = None;
-            s.master_key = None;
-            s.last_unlocked = None;
+            let auth = match &s.vault {
+                crate::VaultState::Locked(d) => d.auth,
+                crate::VaultState::Unlocked(d) => d.auth,
+            };
+            s.vault = crate::VaultState::Locked(crate::LockedData { auth });
             self.update_status(&s);
             println!("Tray: Vault locked and memory purged");
             false
         } else if event.id == self.reload_item.id() {
             let mut s = state.lock().unwrap();
-            s.secrets = None; // Force reload on next request
+            let auth = match &s.vault {
+                crate::VaultState::Locked(d) => d.auth,
+                crate::VaultState::Unlocked(d) => d.auth,
+            };
+            s.vault = crate::VaultState::Locked(crate::LockedData { auth });
             println!("Tray: Refresh requested (cache cleared)");
             false
         } else if event.id == self.open_config_item.id() {

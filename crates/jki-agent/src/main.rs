@@ -27,69 +27,96 @@ struct Args {
     pub auth: AuthSource,
 }
 
-pub struct State {
-    pub secrets: Option<HashMap<String, AccountSecret>>,
-    pub master_key: Option<secrecy::SecretString>,
-    pub last_unlocked: Option<Instant>,
-    pub ttl: Duration,
+pub struct LockedData {
     pub auth: AuthSource,
+}
+
+pub struct UnlockedData {
+    pub secrets: HashMap<String, AccountSecret>,
+    pub master_key: secrecy::SecretString,
+    pub last_unlocked: Instant,
+    pub auth: AuthSource,
+}
+
+pub enum VaultState {
+    Locked(LockedData),
+    Unlocked(UnlockedData),
+}
+
+pub struct State {
+    pub vault: VaultState,
+    pub ttl: Duration,
 }
 
 impl State {
     fn new(auth: AuthSource) -> Self {
         Self {
-            secrets: None,
-            master_key: None,
-            last_unlocked: None,
+            vault: VaultState::Locked(LockedData { auth }),
             ttl: Duration::from_secs(3600), // 1 hour TTL
-            auth,
         }
     }
 
     fn check_ttl(&mut self) {
-        if let Some(last) = self.last_unlocked {
-            if last.elapsed() > self.ttl {
-                self.secrets = None;
-                self.master_key = None;
-                self.last_unlocked = None;
+        if let VaultState::Unlocked(ref data) = self.vault {
+            if data.last_unlocked.elapsed() > self.ttl {
+                let auth = data.auth;
+                println!("Session expired (TTL). Locking vault.");
+                self.vault = VaultState::Locked(LockedData { auth });
             }
         }
     }
 
     pub fn account_count(&self) -> usize {
-        self.secrets.as_ref().map(|s| s.len()).unwrap_or(0)
+        match &self.vault {
+            VaultState::Unlocked(data) => data.secrets.len(),
+            VaultState::Locked(_) => 0,
+        }
+    }
+
+    pub fn is_unlocked(&self) -> bool {
+        matches!(self.vault, VaultState::Unlocked(_))
     }
 
     fn unlock(&mut self, master_key: secrecy::SecretString) -> anyhow::Result<String> {
+        let auth = match &self.vault {
+            VaultState::Locked(d) => d.auth,
+            VaultState::Unlocked(d) => d.auth,
+        };
+
         let sec_path = JkiPath::secrets_path();
         let decrypted_path = JkiPath::decrypted_secrets_path();
 
-        let source = if sec_path.exists() && self.auth != AuthSource::Plaintext {
+        let (secrets_map, source) = if sec_path.exists() && auth != AuthSource::Plaintext {
             let sec_encrypted = std::fs::read(&sec_path).context("Failed to read encrypted vault")?;
             let sec_json = decrypt_with_master_key(&sec_encrypted, &master_key).map_err(|e| anyhow!(e))?;
-            let secrets_map: HashMap<String, AccountSecret> = serde_json::from_slice(&sec_json).context("Failed to parse vault secrets")?;
-
-            self.secrets = Some(secrets_map);
-            self.last_unlocked = Some(Instant::now());
-            "Encrypted Vault".to_string()
+            let map: HashMap<String, AccountSecret> = serde_json::from_slice(&sec_json).context("Failed to parse vault secrets")?;
+            (map, "Encrypted Vault")
         } else if decrypted_path.exists() {
             let sec_json = std::fs::read(&decrypted_path).context("Failed to read plaintext vault")?;
-            let secrets_map: HashMap<String, AccountSecret> = serde_json::from_slice(&sec_json).context("Failed to parse plaintext secrets")?;
-
-            self.secrets = Some(secrets_map);
-            self.last_unlocked = Some(Instant::now());
-            "Plaintext Vault".to_string()
+            let map: HashMap<String, AccountSecret> = serde_json::from_slice(&sec_json).context("Failed to parse plaintext secrets")?;
+            (map, "Plaintext Vault")
         } else {
             return Err(anyhow!("Secrets file missing (neither .age nor .json found)"));
         };
 
-        self.master_key = Some(master_key);
-        Ok(source)
+        self.vault = VaultState::Unlocked(UnlockedData {
+            secrets: secrets_map,
+            master_key,
+            last_unlocked: Instant::now(),
+            auth,
+        });
+
+        Ok(source.to_string())
     }
 
     fn unlock_with_biometric(&mut self) -> anyhow::Result<String> {
         use jki_core::keychain::{KeyringStore, SecretStore};
         
+        let auth = match &self.vault {
+            VaultState::Locked(d) => d.auth,
+            VaultState::Unlocked(d) => d.auth,
+        };
+
         let store = KeyringStore;
         let master_key = store.get_secret("jki", "master_key")
             .map_err(|e| anyhow!("Failed to retrieve master key from keychain: {}", e))?;
@@ -110,9 +137,12 @@ impl State {
             return Err(anyhow!("Secrets file missing (neither .age nor .json found)"));
         };
 
-        self.secrets = Some(secrets_map);
-        self.master_key = Some(master_key);
-        self.last_unlocked = Some(Instant::now());
+        self.vault = VaultState::Unlocked(UnlockedData {
+            secrets: secrets_map,
+            master_key,
+            last_unlocked: Instant::now(),
+            auth,
+        });
         
         Ok(source.to_string())
     }
@@ -120,13 +150,16 @@ impl State {
     fn get_otp(&mut self, account_id: &str) -> anyhow::Result<String> {
         self.check_ttl();
         
-        if self.secrets.is_none() {
-            if let Some(key) = self.master_key.clone() {
-                let _ = self.unlock(key)?;
-            }
-        }
+        // Passive re-unlock if we have the master_key but session expired
+        // This is now safer because we don't store master_key in Locked state anymore.
+        // Wait, if we want to support Passive Re-unlock, we might need a third state "LockedWithKey".
+        // For now, let's stick to strict Locked/Unlocked.
 
-        let secrets = self.secrets.as_ref().ok_or_else(|| anyhow!("Agent is locked"))?;
+        let secrets = match &self.vault {
+            VaultState::Unlocked(data) => &data.secrets,
+            VaultState::Locked(_) => return Err(anyhow!("Agent is locked")),
+        };
+
         let secret = secrets.get(account_id).ok_or_else(|| anyhow!("Account not found"))?;
         
         let acc = Account {
@@ -318,14 +351,18 @@ fn handle_client_io<S: Read + Write>(stream: S, state: Arc<Mutex<State>>, shutdo
             Request::GetMasterKey => {
                 use secrecy::ExposeSecret;
                 let s = state.lock().unwrap();
-                match &s.master_key {
-                    Some(key) => Response::MasterKey(key.expose_secret().clone()),
-                    None => Response::Error("Agent is locked".to_string()),
+                match &s.vault {
+                    VaultState::Unlocked(data) => Response::MasterKey(data.master_key.expose_secret().clone()),
+                    VaultState::Locked(_) => Response::Error("Agent is locked".to_string()),
                 }
             }
             Request::Reload => {
                 let mut s = state.lock().unwrap();
-                s.secrets = None;
+                let auth = match &s.vault {
+                    VaultState::Locked(d) => d.auth,
+                    VaultState::Unlocked(d) => d.auth,
+                };
+                s.vault = VaultState::Locked(LockedData { auth });
                 Response::Success
             }
             Request::Shutdown => {
