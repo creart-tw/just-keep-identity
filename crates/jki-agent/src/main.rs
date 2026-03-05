@@ -491,4 +491,66 @@ mod tests {
         env::remove_var("JKI_SECRETS_PATH");
     }
 
+    #[test]
+    #[serial]
+    fn test_vault_state_ttl_expiration() {
+        let mut state = State::new(AuthSource::Auto);
+        state.ttl = Duration::from_millis(10);
+        
+        // Setup Unlocked state
+        state.vault = VaultState::Unlocked(UnlockedData {
+            secrets: HashMap::new(),
+            master_key: secrecy::SecretString::from("test".to_string()),
+            last_unlocked: Instant::now(),
+            auth: AuthSource::Auto,
+        });
+        
+        std::thread::sleep(Duration::from_millis(20));
+        state.check_ttl();
+        
+        match state.vault {
+            VaultState::LockedPersistent(_) => {},
+            _ => panic!("Expected LockedPersistent after TTL"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_vault_passive_re_unlock() {
+        use tempfile::tempdir;
+        use std::env;
+        use jki_core::encrypt_with_master_key;
+
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("jki_home_passive");
+        std::fs::create_dir_all(&home).unwrap();
+        env::set_var("JKI_HOME", home.to_str().unwrap());
+
+        let master_key_val = "testpass";
+        let master_key = secrecy::SecretString::from(master_key_val.to_string());
+        
+        let acc_id = "test-id";
+        let mut secrets_map = HashMap::new();
+        secrets_map.insert(acc_id.to_string(), AccountSecret {
+            secret: "JBSWY3DPEHPK3PXP".to_string(),
+            digits: 6,
+            algorithm: "SHA1".to_string(),
+        });
+        let encrypted = encrypt_with_master_key(&serde_json::to_vec(&secrets_map).unwrap(), &master_key).unwrap();
+        std::fs::write(home.join("vault.secrets.bin.age"), encrypted).unwrap();
+
+        let mut state = State::new(AuthSource::Auto);
+        // Start in LockedPersistent
+        state.vault = VaultState::LockedPersistent(LockedPersistentData {
+            master_key: master_key.clone(),
+            auth: AuthSource::Auto,
+        });
+
+        // get_otp should trigger passive re-unlock
+        let otp = state.get_otp(acc_id).unwrap();
+        assert_eq!(otp.len(), 6);
+        assert!(state.is_unlocked());
+
+        env::remove_var("JKI_HOME");
+    }
 }

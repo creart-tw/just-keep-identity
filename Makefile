@@ -1,7 +1,7 @@
 # Load macOS signing variables if the file exists
 -include .env.macos
 
-.PHONY: all release install clean dev test-all cov help bundle bundle-app bundle-icon
+.PHONY: all release install clean dev test-all cov snapshot snapshot-clean help bundle bundle-app bundle-icon
 
 # Directories
 BIN_DIR = $(HOME)/.local/bin
@@ -37,6 +37,18 @@ test-all:
 ## cov: Run tests and generate coverage report (HTML)
 cov:
 	CARGO_TARGET_DIR=target/tarpaulin cargo tarpaulin --workspace --out Html --skip-clean
+
+## snapshot: Create .stable snapshots for all Rust source files
+snapshot:
+	@echo "Creating .stable snapshots..."
+	@find crates -name "*.rs" -exec cp {} {}.stable \;
+	@echo "Snapshots created."
+
+## snapshot-clean: Remove all .stable snapshot files
+snapshot-clean:
+	@echo "Cleaning up .stable snapshots..."
+	@find crates -name "*.stable" -delete
+	@echo "Cleanup complete."
 
 ## install: Build and deploy binaries using install.sh
 install:
