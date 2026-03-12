@@ -141,7 +141,7 @@ fn resolve_target(
     has_double_dash: bool,
     accounts: &[Account],
     list_mode: bool,
-    quiet: bool,
+    _quiet: bool,
 ) -> (Vec<MatchedAccount>, Option<Account>) {
     if has_double_dash {
         let results = if patterns.is_empty() {
@@ -270,10 +270,46 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         return Err(anyhow!("No matches found"));
     }
 
-    let acc_ref = if let Some(ref acc) = target_acc {
+    // 智慧命中邏輯 (Dominant Winner)
+    let selected_acc = if let Some(acc) = target_acc {
         Some(acc)
     } else {
-        if cli.list || patterns.is_empty() {
+        // 如果使用者有傳入 patterns 且不是為了列出清單，我們嘗試尋找壓倒性勝出者
+        if !patterns.is_empty() && !cli.list {
+            let mut sorted = initial_results.clone();
+            sorted.sort_by(|a, b| b.score.cmp(&a.score));
+
+            let dominant = if sorted.len() == 1 {
+                Some(sorted[0].account.clone())
+            } else if sorted.len() > 1 && (sorted[0].score - sorted[1].score) >= 40 {
+                // 如果第一名顯著領先第二名，自動命中
+                Some(sorted[0].account.clone())
+            } else {
+                None
+            };
+
+            if let Some(acc) = dominant {
+                Some(acc)
+            } else {
+                // 有歧義，列出清單 (維持穩定順序顯示)
+                if !cli.quiet {
+                    eprintln!("Ambiguous results (found {} matches):", initial_results.len());
+                    for (i, matched) in initial_results.iter().enumerate() {
+                        let acc = &matched.account;
+                        let issuer_str = if let Some(ref s) = acc.issuer {
+                            format!("[{}] ", render_highlighted(s, &matched.issuer_indices))
+                        } else {
+                            "".to_string()
+                        };
+                        let name_str = render_highlighted(&acc.name, &matched.name_indices);
+                        println!("{:2}) {}{}", i + 1, issuer_str, name_str);
+                    }
+                    eprintln!("\n[Tip] Be more specific, or use 'jki <pattern> <index>' to select.");
+                }
+                return Ok(());
+            }
+        } else if patterns.is_empty() || cli.list {
+            // 列出清單 (維持穩定順序)
             if !cli.quiet {
                 let header = if patterns.is_empty() { "Accounts" } else { "Matches" };
                 eprintln!("{}:", header);
@@ -289,26 +325,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 }
             }
             return Ok(());
+        } else {
+            None
         }
-
-        if !cli.quiet {
-            eprintln!("Ambiguous results (found {} matches):", initial_results.len());
-            for (i, matched) in initial_results.iter().enumerate() {
-                let acc = &matched.account;
-                let issuer_str = if let Some(ref s) = acc.issuer {
-                    format!("[{}] ", render_highlighted(s, &matched.issuer_indices))
-                } else {
-                    "".to_string()
-                };
-                let name_str = render_highlighted(&acc.name, &matched.name_indices);
-                println!("{:2}) {}{}", i + 1, issuer_str, name_str);
-            }
-            eprintln!("\n[Tip] Be more specific, or use 'jki <pattern> <index>' to select.");
-        }
-        return Ok(());
     };
 
-    if let Some(acc) = acc_ref {
+    if let Some(acc) = selected_acc {
         let label = format!("{}{}", acc.issuer.as_deref().map(|s| format!("[{}] ", s)).unwrap_or_default(), acc.name);
         
         // Plaintext check

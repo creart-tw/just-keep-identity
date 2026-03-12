@@ -187,16 +187,20 @@ pub fn search_accounts(accounts: &[Account], patterns: &[String]) -> Vec<Matched
 
                 match (issuer_res, name_res) {
                     (Some((s1, mut i1)), Some((s2, mut i2))) => {
-                        total_score += s1.max(s2);
+                        // 智慧加權：Issuer 命中權重更高，且優先考慮前綴匹配
+                        let s1_weighted = adjust_score(s1, issuer, p, true);
+                        let s2_weighted = adjust_score(s2, name, p, false);
+
+                        total_score += s1_weighted.max(s2_weighted);
                         all_issuer_indices.append(&mut i1);
                         all_name_indices.append(&mut i2);
                     }
                     (Some((s, mut i)), None) => {
-                        total_score += s;
+                        total_score += adjust_score(s, issuer, p, true);
                         all_issuer_indices.append(&mut i);
                     }
                     (None, Some((s, mut i))) => {
-                        total_score += s;
+                        total_score += adjust_score(s, name, p, false);
                         all_name_indices.append(&mut i);
                     }
                     (None, None) => return None,
@@ -216,6 +220,29 @@ pub fn search_accounts(accounts: &[Account], patterns: &[String]) -> Vec<Matched
             })
         })
         .collect()
+}
+
+fn adjust_score(base_score: i64, target: &str, pattern: &str, is_issuer: bool) -> i64 {
+    let mut score = base_score;
+
+    // 1. 欄位權重：Issuer 比 Name 更具識別性
+    if is_issuer {
+        score += 20;
+    }
+
+    // 2. 前綴獎勵：開頭匹配是強烈意圖的表現
+    let target_lc = target.to_lowercase();
+    let pattern_lc = pattern.to_lowercase();
+    if target_lc.starts_with(&pattern_lc) {
+        score += 50;
+        if is_issuer {
+            score += 50; // Issuer 前綴最為關鍵
+        }
+    } else if target_lc.contains(&pattern_lc) {
+        score += 20; // 包含但不一定是開頭
+    }
+
+    score
 }
 
 // --- 互動抽象 (用於 Mock 測試) ---
@@ -350,7 +377,7 @@ pub enum AuthSource {
 pub fn acquire_master_key(
     source: AuthSource,
     interactor: &dyn Interactor,
-    secret_store: Option<&dyn keychain::SecretStore>,
+    _secret_store: Option<&dyn keychain::SecretStore>,
 ) -> Result<SecretString> {
     use crate::paths::JkiPath;
 
@@ -363,7 +390,7 @@ pub fn acquire_master_key(
 
             // 2. Try Secret Store (Keychain/Keyring)
             #[cfg(feature = "keychain")]
-            if let Some(store) = secret_store {
+            if let Some(store) = _secret_store {
                 if let Ok(key) = store.get_secret("jki", "master_key") {
                     return Ok(key);
                 }
