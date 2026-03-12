@@ -10,6 +10,7 @@ use jki_core::{
     import::parse_otpauth_uri,
     Interactor,
     TerminalInteractor,
+    find_duplicate_groups,
     keychain::{KeyringStore, SecretStore},
     AuthSource,
     JkiPathExt,
@@ -140,6 +141,18 @@ pub enum Commands {
     Completions {
         /// The shell to generate completions for
         shell: clap_complete::Shell,
+    },
+    /// Deduplicate accounts by comparing decrypted secrets
+    Dedupe {
+        /// Keep specific accounts by index (comma-separated, e.g., 1,3,5)
+        #[arg(short, long, value_delimiter = ',')]
+        keep: Vec<usize>,
+        /// Discard specific accounts by index (comma-separated, e.g., 2,4,6)
+        #[arg(short, long, value_delimiter = ',')]
+        discard: Vec<usize>,
+        /// Automatically accept the deletion of shadow entries when using --keep
+        #[arg(short, long)]
+        yes: bool,
     },
 }
 
@@ -1007,6 +1020,156 @@ fn perform_handshake(acc: &Account, is_authorized: bool, stdout_flag: bool) -> a
     res
 }
 
+fn handle_dedupe(
+    keep: &Vec<usize>,
+    discard: &Vec<usize>,
+    yes: bool,
+    auth: AuthSource,
+    interactor: &dyn Interactor,
+    quiet: bool,
+) -> anyhow::Result<()> {
+    let meta_path = JkiPath::metadata_path();
+    let sec_path = JkiPath::secrets_path();
+    let dec_path = JkiPath::decrypted_secrets_path();
+
+    if !meta_path.exists() {
+        return Err(anyhow!("Metadata not found. Run 'jkim init' first."));
+    }
+
+    let master_key = acquire_master_key(auth, interactor, None).map_err(|e| anyhow!("Authentication failed: {}", e))?;
+
+    let meta_content = fs::read_to_string(&meta_path).context("Failed to read metadata")?;
+    let mut metadata: MetadataFile = serde_json::from_str(&meta_content).context("Failed to parse metadata")?;
+
+    let mut secrets_map: HashMap<String, AccountSecret> = if dec_path.exists() {
+        let content = fs::read(&dec_path).context("Failed to read plaintext secrets")?;
+        serde_json::from_slice(&content).context("Failed to parse plaintext secrets")?
+    } else if sec_path.exists() {
+        let encrypted = fs::read(&sec_path).context("Failed to read secrets file")?;
+        let decrypted = decrypt_with_master_key(&encrypted, &master_key).map_err(|e| anyhow!(e))?;
+        serde_json::from_slice(&decrypted).context("Failed to parse existing secrets JSON")?
+    } else {
+        return Err(anyhow!("Secrets not found."));
+    };
+
+    let (integrated, _) = jki_core::integrate_accounts(metadata.accounts.clone(), &secrets_map);
+    let groups = find_duplicate_groups(&integrated);
+
+    if groups.is_empty() {
+        if !quiet { println!("No duplicates found."); }
+        return Ok(());
+    }
+
+    // 2. Identifying deletions
+    let mut to_delete_ids = std::collections::HashSet::new();
+
+    // Check for conflicts between keep and discard
+    for idx in keep {
+        if discard.contains(idx) {
+            return Err(anyhow!("Conflict: Index {} is in both --keep and --discard.", idx));
+        }
+    }
+
+    if keep.is_empty() && discard.is_empty() {
+        // List mode
+        println!("The following duplicate groups were found:\n");
+        for group in &groups {
+            println!("Group (Secret: {}...):", &group.secret[..std::cmp::min(8, group.secret.len())]);
+            for acc in &group.accounts {
+                println!("  {:>2}) [{}] {} (ID: {})",
+                    acc.global_index,
+                    acc.account.issuer.as_deref().unwrap_or("None"),
+                    acc.account.name,
+                    &acc.account.id[..8]
+                );
+            }
+            println!();
+        }
+        println!("Run 'jkim dedupe -k <idx>' to keep one item and delete its shadows.");
+        println!("Run 'jkim dedupe -d <idx>' to delete specific items.");
+        return Ok(());
+    }
+
+    // Handle --keep
+    for &k_idx in keep {
+        let mut found = false;
+        for group in &groups {
+            if let Some(_) = group.accounts.iter().find(|a| a.global_index == k_idx) {
+                found = true;
+                // Delete everything else in this group
+                for other in &group.accounts {
+                    if other.global_index != k_idx {
+                        to_delete_ids.insert(other.account.id.clone());
+                    }
+                }
+            }
+        }
+        if !found {
+            return Err(anyhow!("Index {} not found in any duplicate group.", k_idx));
+        }
+    }
+
+    // Handle --discard
+    for &d_idx in discard {
+        let mut found = false;
+        for group in &groups {
+            if let Some(target) = group.accounts.iter().find(|a| a.global_index == d_idx) {
+                found = true;
+                to_delete_ids.insert(target.account.id.clone());
+            }
+        }
+        if !found {
+            return Err(anyhow!("Index {} not found in any duplicate group.", d_idx));
+        }
+    }
+
+    // 3. Safety Verification
+    if to_delete_ids.is_empty() {
+        println!("Nothing to delete based on the provided indices.");
+        return Ok(());
+    }
+
+    println!("!!! WARNING: PERMANENT DELETION !!!");
+    println!("The following entries will be removed from Metadata and Secrets vault:");
+    for acc in &integrated {
+        if to_delete_ids.contains(&acc.id) {
+            println!("  - [{}] {} (ID: {})",
+                acc.issuer.as_deref().unwrap_or("None"),
+                acc.name,
+                acc.id
+            );
+        }
+    }
+    println!("\nTotal to delete: {} entries.", to_delete_ids.len());
+
+    if !yes && !interactor.confirm("Proceed with deletion?", false) {
+        println!("Aborted.");
+        return Ok(());
+    }
+
+    // 4. Performing the Sweep
+    metadata.accounts.retain(|a| !to_delete_ids.contains(&a.id));
+    for id in &to_delete_ids {
+        secrets_map.remove(id);
+    }
+
+    // Save back
+    let secrets_json = serde_json::to_vec(&secrets_map).context("Failed to serialize secrets")?;
+    if sec_path.exists() {
+        let encrypted = encrypt_with_master_key(&secrets_json, &master_key).map_err(|e| anyhow!("Encryption failed: {}", e))?;
+        fs::write(&sec_path, encrypted).context("Failed to write encrypted vault")?;
+    } else if dec_path.exists() {
+        fs::write(&dec_path, &secrets_json).context("Failed to write plaintext vault")?;
+    }
+
+    fs::write(&meta_path, serde_json::to_string_pretty(&metadata).unwrap()).context("Failed to write metadata")?;
+
+    println!("Success: {} entries removed.", to_delete_ids.len());
+    let _ = jki_core::agent::AgentClient::reload();
+
+    Ok(())
+}
+
 fn handle_add(
     name: &Option<String>,
     issuer: &Option<String>,
@@ -1238,6 +1401,8 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             let bin_name = cmd.get_name().to_string();
             clap_complete::generate(*shell, &mut cmd, bin_name, &mut std::io::stdout());
         }
+        Commands::Dedupe { keep, discard, yes } =>
+            handle_dedupe(keep, discard, *yes, auth, &interactor, cli.quiet)?,
     }
     Ok(())
 }
@@ -1864,5 +2029,124 @@ mod tests {
         let meta_content = fs::read_to_string(home.join("vault.metadata.json")).unwrap();
         let metadata: MetadataFile = serde_json::from_str(&meta_content).unwrap();
         assert_eq!(metadata.accounts.len(), 1);
+    }
+
+    #[test]
+    #[serial]
+    fn test_handle_dedupe() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("jki_home_dedupe");
+        env::set_var("JKI_HOME", &home);
+        fs::create_dir_all(&home).unwrap();
+
+        // 1. Setup metadata with duplicates
+        let metadata = MetadataFile {
+            version: 1,
+            accounts: vec![
+                Account { id: "1".to_string(), name: "user1".to_string(), issuer: Some("Google".to_string()), account_type: AccountType::Standard, secret: "".to_string(), digits: 6, algorithm: "SHA1".to_string() },
+                Account { id: "2".to_string(), name: "user1@gmail.com".to_string(), issuer: Some("Google".to_string()), account_type: AccountType::Standard, secret: "".to_string(), digits: 6, algorithm: "SHA1".to_string() },
+                Account { id: "3".to_string(), name: "other".to_string(), issuer: None, account_type: AccountType::Standard, secret: "".to_string(), digits: 6, algorithm: "SHA1".to_string() },
+            ]
+        };
+        fs::write(home.join("vault.metadata.json"), serde_json::to_string(&metadata).unwrap()).unwrap();
+
+        // 2. Setup secrets (1 and 2 are duplicates)
+        let mut secrets_map = HashMap::new();
+        secrets_map.insert("1".to_string(), AccountSecret { secret: "JBSWY3DPEHPK3PXP".to_string(), digits: 6, algorithm: "SHA1".to_string() });
+        secrets_map.insert("2".to_string(), AccountSecret { secret: "JBSWY3DPEHPK3PXP".to_string(), digits: 6, algorithm: "SHA1".to_string() });
+        secrets_map.insert("3".to_string(), AccountSecret { secret: "DIFFERENT".to_string(), digits: 6, algorithm: "SHA1".to_string() });
+        fs::write(home.join("vault.secrets.json"), serde_json::to_vec(&secrets_map).unwrap()).unwrap();
+
+        let interactor = jki_core::MockInteractor {
+            prompts: RefCell::new(vec![]),
+            passwords: RefCell::new(vec!["testpass".to_string()]),
+            confirms: RefCell::new(vec![true]), // Confirm deletion
+        };
+
+        // 3. Run dedupe: keep index 2 (user1@gmail.com), index 1 should be removed
+        handle_dedupe(&vec![2], &vec![], false, AuthSource::Auto, &interactor, true).unwrap();
+
+        let meta_content = fs::read_to_string(home.join("vault.metadata.json")).unwrap();
+        let updated_meta: MetadataFile = serde_json::from_str(&meta_content).unwrap();
+
+        assert_eq!(updated_meta.accounts.len(), 2);
+        assert!(updated_meta.accounts.iter().any(|a| a.id == "2"));
+        assert!(updated_meta.accounts.iter().any(|a| a.id == "3"));
+        assert!(!updated_meta.accounts.iter().any(|a| a.id == "1"));
+
+        let sec_content = fs::read(home.join("vault.secrets.json")).unwrap();
+        let updated_secrets: HashMap<String, AccountSecret> = serde_json::from_slice(&sec_content).unwrap();
+        assert_eq!(updated_secrets.len(), 2);
+        assert!(!updated_secrets.contains_key("1"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_handle_dedupe_discard() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("jki_home_dedupe_discard");
+        env::set_var("JKI_HOME", &home);
+        fs::create_dir_all(&home).unwrap();
+
+        let metadata = MetadataFile {
+            version: 1,
+            accounts: vec![
+                Account { id: "1".to_string(), name: "user1".to_string(), issuer: Some("Google".to_string()), account_type: AccountType::Standard, secret: "".to_string(), digits: 6, algorithm: "SHA1".to_string() },
+                Account { id: "2".to_string(), name: "user2".to_string(), issuer: Some("Google".to_string()), account_type: AccountType::Standard, secret: "".to_string(), digits: 6, algorithm: "SHA1".to_string() },
+            ]
+        };
+        fs::write(home.join("vault.metadata.json"), serde_json::to_string(&metadata).unwrap()).unwrap();
+
+        let mut secrets_map = HashMap::new();
+        secrets_map.insert("1".to_string(), AccountSecret { secret: "DUP".to_string(), digits: 6, algorithm: "SHA1".to_string() });
+        secrets_map.insert("2".to_string(), AccountSecret { secret: "DUP".to_string(), digits: 6, algorithm: "SHA1".to_string() });
+        fs::write(home.join("vault.secrets.json"), serde_json::to_vec(&secrets_map).unwrap()).unwrap();
+
+        let interactor = jki_core::MockInteractor {
+            prompts: RefCell::new(vec![]),
+            passwords: RefCell::new(vec!["p".to_string()]),
+            confirms: RefCell::new(vec![true]),
+        };
+
+        // Discard index 1
+        handle_dedupe(&vec![], &vec![1], false, AuthSource::Auto, &interactor, true).unwrap();
+
+        let meta_content = fs::read_to_string(home.join("vault.metadata.json")).unwrap();
+        let updated_meta: MetadataFile = serde_json::from_str(&meta_content).unwrap();
+        assert_eq!(updated_meta.accounts.len(), 1);
+        assert_eq!(updated_meta.accounts[0].id, "2");
+    }
+
+    #[test]
+    #[serial]
+    fn test_handle_dedupe_conflict() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("jki_home_dedupe_conflict_test");
+        env::set_var("JKI_HOME", &home);
+        fs::create_dir_all(&home).unwrap();
+
+        let metadata = MetadataFile {
+            version: 1,
+            accounts: vec![
+                Account { id: "1".to_string(), name: "u".to_string(), issuer: None, account_type: AccountType::Standard, secret: "".to_string(), digits: 6, algorithm: "SHA1".to_string() },
+                Account { id: "2".to_string(), name: "u".to_string(), issuer: None, account_type: AccountType::Standard, secret: "".to_string(), digits: 6, algorithm: "SHA1".to_string() },
+            ]
+        };
+        fs::write(home.join("vault.metadata.json"), serde_json::to_string(&metadata).unwrap()).unwrap();
+        let mut secrets_map = HashMap::new();
+        secrets_map.insert("1".to_string(), AccountSecret { secret: "S".to_string(), digits: 6, algorithm: "SHA1".to_string() });
+        secrets_map.insert("2".to_string(), AccountSecret { secret: "S".to_string(), digits: 6, algorithm: "SHA1".to_string() });
+        fs::write(home.join("vault.secrets.json"), serde_json::to_vec(&secrets_map).unwrap()).unwrap();
+
+        let interactor = jki_core::MockInteractor {
+            prompts: RefCell::new(vec![]),
+            passwords: RefCell::new(vec!["p".to_string()]),
+            confirms: RefCell::new(vec![]),
+        };
+
+        // Conflict: keep and discard the same index
+        let res = handle_dedupe(&vec![1], &vec![1], false, AuthSource::Auto, &interactor, true);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("Conflict"));
     }
 }

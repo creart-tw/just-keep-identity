@@ -109,7 +109,9 @@ fn handle_agent(cmd: &AgentCommands, _auth: AuthSource, _quiet: bool) -> anyhow:
 }
 
 fn handle_output(data: String, label: String, source: &str, data_type: &str, stdout_flag: bool, quiet: bool) {
-    if !quiet { eprintln!("[{}/{}] Selected: {}", source, data_type, label); }
+    if !quiet {
+        eprintln!("{} {}: {}", style(format!("[{}/{}]", source, data_type)).green().bold(), style("Selected").bold(), style(label.clone()).cyan());
+    }
     if stdout_flag { println!("{}", data); }
     else {
         use copypasta::{ClipboardContext, ClipboardProvider};
@@ -293,16 +295,26 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             } else {
                 // 有歧義，列出清單 (維持穩定順序顯示)
                 if !cli.quiet {
-                    eprintln!("Ambiguous results (found {} matches):", initial_results.len());
+                    let top_score = sorted[0].score;
+                    let second_score = sorted[1].score;
+                    let top_id = &sorted[0].account.id;
+
+                    eprintln!("{} (Gap {} < 40):", style("Ambiguous results").yellow().bold(), top_score - second_score);
+
                     for (i, matched) in initial_results.iter().enumerate() {
                         let acc = &matched.account;
+                        let is_top = acc.id == *top_id;
+
+                        let marker = if is_top { style(">").green().bold().to_string() } else { " ".to_string() };
+                        let score_tag = if is_top { style(format!(" (Score: {})", matched.score)).dim().to_string() } else { "".to_string() };
+
                         let issuer_str = if let Some(ref s) = acc.issuer {
                             format!("[{}] ", render_highlighted(s, &matched.issuer_indices))
                         } else {
                             "".to_string()
                         };
                         let name_str = render_highlighted(&acc.name, &matched.name_indices);
-                        println!("{:2}) {}{}", i + 1, issuer_str, name_str);
+                        println!("{} {:2}) {}{}{}", marker, i + 1, issuer_str, name_str, score_tag);
                     }
                     eprintln!("\n[Tip] Be more specific, or use 'jki <pattern> <index>' to select.");
                 }

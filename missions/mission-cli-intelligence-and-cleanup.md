@@ -11,34 +11,22 @@
 
 ## 2. 策略與階段 (Strategy & Phases)
 
-### Phase 1: Fuzzy 智慧升級 (Intelligence Upgrade)
-1. **引入 `fuzzy-matcher` (Skim 演算法)**：整合至 `jki-core`。
-2. **Fuzzy Subcommand**：在進入 `clap` 之前攔截參數，對子指令執行模糊解析。
-   - 優點：不再需要手動維護 `alias`。
-   - 邏輯：根據分數（Score）自動映射或列出 `Did you mean...`。
-3. **Fuzzy Account Search (排序與高亮)**：
-   - **權重排序**：`Score` 最高者置頂。`jki ggl` 會精準命中 `Google` (Score: 100+) 而非 `Glow-Girl` (Score: 20)。
-   - **視覺高亮範例**：
-     ```text
-     搜尋關鍵字: 'iw'
-     結果展示:
-     1) [Google] [i]mport-[w]inauth@gmail.com (ID: uuid-x)
-     2) [Work] [i]nner-[w]eb (ID: uuid-y)
-     (括號 [] 代表 ANSI 高亮/加底線)
-     ```
-4. **智慧解析邏輯**：
+### Phase 1: Fuzzy 智慧升級 (Intelligence Upgrade) - [In Progress]
+1. [x] **引入 `fuzzy-matcher` (Skim 演算法)**：整合至 `jki-core` 並實作 `MatchedAccount` 結構。
+2. [x] **智慧計分矩陣**：實作 `adjust_score`，建立「Issuer > Name」與「Prefix Bonus」權重邏輯。
+3. [x] **搜尋結果高亮**：實作 ANSI 渲染，視覺化解噪。
+4. [x] **智慧自動選中 (Dominant Winner)**：實作「顯著差異 (Gap >= 40)」判定，實現極速產碼。
+5. [ ] **提示與診斷硬化 (Feedback Transparency)**：
+   - 在歧義 (Ambiguous) 時輸出分數差距對比。
+   - 優化自動選中時的 stderr 提示，確保使用者具備感知。
+   - (Optional) 實作 `--debug-score` 診斷計分邏輯。
+6. [ ] **Fuzzy Subcommand**：在進入 `clap` 之前攔截參數，對子指令執行模糊解析 (如 `iw` -> `import-winauth`)。
+   - 邏輯：根據分數自動映射或列出 `Did you mean...`。
 
-### Phase 2: 事後去重工具 (`jkim dedupe`)
-1. **診斷與列舉 (Diagnosis)**：按 Secret 內容分組，並分配**全域唯一序號**。
-   - `Group A` (Secret X): 1, 2, 3...
-   - `Group B` (Secret Y): 4, 5, 6...
-2. **標記與清除 (Mark-and-Sweep)**：
-   - **`-d <idx>` (Discard)**：標記刪除物理 ID。
-   - **`-k <idx>` (Keep)**：組內排除法，標記保留此項並刪除該組其餘所有影子條目。
-3. **內部實作紀律**：
-   - 物理操作（Sweep）必須基於 ID。
-   - **二選一原子性**：同步修改 YAML 與 `.age` 加密金庫。
-   - **衝突診斷**：針對同序號同時標記 -k/-d 或同組多個 -k 時報錯。
+### Phase 2: 事後去重工具 (`jkim dedupe`) - [Completed]
+1. [x] **診斷與列舉 (Diagnosis)**：按 Secret 內容分組，並分配**全域唯一序號**。
+2. [x] **標記與清除 (Mark-and-Sweep)**：
+3. [x] **內部實作紀律**：
 
 ### Phase 3: 知識資產與手冊硬化 (Knowledge Asset SSoT)
 1. **建立中控資產庫 (Assets-Based Architecture)**：
@@ -60,8 +48,23 @@
 ```
 
 ### 3.2. `jkim dedupe -k2 -d6` (Cleanup)
-- Group A: 僅保留 2，刪除 1, 3。
-- Group B: 刪除 6，保留 4, 5, 7。
+偵測到重複金鑰，分組列出並分配全域序號：
+```text
+Group A: (Secret: JBSW...3PXP)
+  1) [None] Google user1 (ID: uuid-a)
+  2) [Google] user1@gmail.com (ID: uuid-b)
+  3) [Old] google-backup (ID: uuid-c)
+
+Group B: (Secret: XOXO...999)
+  4) GitHub lichih (ID: uuid-d)
+  5) [gitlab] lichihwu (ID: uuid-e)
+  6) [None] git (ID: uuid-f)
+  7) [Test] temp (ID: uuid-g)
+```
+
+執行 `jkim dedupe -k2 -d6` 的邏輯效果：
+- **Group A**：指定保留 2，系統自動將同組的 1, 3 標記為刪除 (Mark-and-Sweep)。
+- **Group B**：指定刪除 6，其餘 4, 5, 7 預設保留。
 
 ### 3.3. `jkim dedupe` 安全確認畫面範例
 ```text
@@ -76,8 +79,8 @@ Proceed with deletion? [y/N]: _
 ```
 
 ## 4. 完成定義 (Definition of Done)
-- [ ] 成功引入 `fuzzy-matcher` 並在指令解析中生效。
-- [ ] `jki` 搜尋結果具備權重排序與高亮。
-- [ ] `jkim dedupe` 指令完成並通過「組內排除與精準刪除」測試。
-- [ ] **安全防護**：`dedupe` 物理刪除前必須列出明細並提供二次確認。
-- [ ] 規格文件 `docs/jki-cli-spec.md` 已同步更新。
+- [x] 成功引入 `fuzzy-matcher` 並在指令解析中生效。
+- [x] `jki` 搜尋結果具備權重排序與高亮。
+- [x] `jkim dedupe` 指令完成並通過「組內排除與精準刪除」測試。
+- [x] **安全防護**：`dedupe` 物理刪除前必須列出明細並提供二次確認。
+- [x] 規格文件 `docs/jki-cli-spec.md` 已同步更新。

@@ -96,6 +96,41 @@ pub enum JkiCoreError {
 
 pub type Result<T> = std::result::Result<T, JkiCoreError>;
 
+#[derive(Debug, Clone)]
+pub struct IndexedAccount {
+    pub global_index: usize,
+    pub account: Account,
+}
+
+#[derive(Debug, Clone)]
+pub struct DuplicateGroup {
+    pub secret: String,
+    pub accounts: Vec<IndexedAccount>,
+}
+
+pub fn find_duplicate_groups(accounts: &[Account]) -> Vec<DuplicateGroup> {
+    let mut groups_map: HashMap<String, Vec<IndexedAccount>> = HashMap::new();
+
+    for (idx, acc) in accounts.iter().enumerate() {
+        let normalized_secret = acc.secret.trim().replace(" ", "").to_uppercase();
+        groups_map.entry(normalized_secret)
+            .or_default()
+            .push(IndexedAccount {
+                global_index: idx + 1, // 1-based indexing for CLI users
+                account: acc.clone(),
+            });
+    }
+
+    let mut result: Vec<DuplicateGroup> = groups_map.into_iter()
+        .filter(|(_, group)| group.len() > 1)
+        .map(|(secret, accounts)| DuplicateGroup { secret, accounts })
+        .collect();
+
+    // Sort groups by the global index of the first account in each group to keep output stable
+    result.sort_by_key(|g| g.accounts[0].global_index);
+    result
+}
+
 pub fn integrate_accounts(metadata: Vec<Account>, secrets: &HashMap<String, AccountSecret>) -> (Vec<Account>, Vec<String>) {
     let mut integrated = Vec::new();
     let mut missing = Vec::new();

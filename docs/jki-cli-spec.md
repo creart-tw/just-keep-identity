@@ -113,6 +113,17 @@
 `jkim edit`
 *   呼叫 `$EDITOR` 編輯 Metadata。存檔後自動執行格式驗證並通知 Agent 重載。
 
+### **3.9 去重工具 (dedupe)**
+`jkim dedupe [-k <IDX>] [-d <IDX>] [-y/--yes]`
+*   **指紋掃描 (Fingerprint Scanning)**：自動解密金庫並根據 Decrypted Secrets 進行分組，為每個帳號分配全域唯一序號。
+*   **Mark-and-Sweep 策略**：
+    *   **無參數**：列出所有重複分組與序號。
+    *   **`-k, --keep <IDX>` (Keep)**：組內排除法。標記保留此項，並將該組內其餘所有項目標記為刪除。
+    *   **`-d, --discard <IDX>` (Discard)**：標記刪除指定序號。
+*   **安全流程**：
+    *   物理刪除前會顯示明細並要求二次確認 (除非指定了 `-y` 或 `--yes`)。
+    *   刪除後自動通知 Agent 重載。
+
 ---
 
 ## **4. 輸出規範 (Output Standards)**
@@ -151,7 +162,7 @@
 
 ### **C.1 核心邏輯層次**
 1.  **過濾層 (Filter Chain)**:
-    *   **Pattern Filter**: 執行 Fuzzy 搜尋。
+    *   **Pattern Filter**: 執行基於 `fuzzy-matcher` (Skim 演算法) 的模糊搜尋，支援權重計分與匹配字元高亮。
     *   **Index Filter**: 若最後一個參數為純數字（且未受 `--` 保護），則從 Pattern 結果中選取對應項。
     *   **Final Results**: 過濾鏈最終產出的結果集。
 2.  **動作層 (Action Selection)**:
