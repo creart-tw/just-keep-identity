@@ -22,6 +22,7 @@ crossterm = "0.29.0"
 keyring = { version = "3.0", features = ["apple-native", "windows-native"], optional = true }
 interprocess = "1.2.1"
 clap = { version = "4.4", features = ["derive"] }
+fuzzy-matcher = "0.3"
 
 [features]
 default = []

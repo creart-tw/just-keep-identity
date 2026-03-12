@@ -1,6 +1,7 @@
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 use secrecy::SecretString;
 use std::io::{Read, Write};
+use fuzzy_matcher::{skim::SkimMatcherV2, FuzzyMatcher};
 
 pub mod import;
 pub mod paths;
@@ -160,31 +161,60 @@ pub fn decrypt_with_master_key(encrypted_data: &[u8], master_key: &SecretString)
 
 // --- 搜尋邏輯 ---
 
-pub fn fuzzy_match(pattern: &str, target: &str) -> bool {
-    let pattern = pattern.to_lowercase();
-    let target = target.to_lowercase();
-    let mut target_chars = target.chars();
-    for p in pattern.chars() {
-        match target_chars.by_ref().find(|&t| t == p) {
-            Some(_) => continue,
-            None => return false,
-        }
-    }
-    true
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchedAccount {
+    pub account: Account,
+    pub score: i64,
+    pub issuer_indices: Vec<usize>,
+    pub name_indices: Vec<usize>,
 }
 
-pub fn search_accounts(accounts: &[Account], patterns: &[String]) -> Vec<Account> {
+pub fn search_accounts(accounts: &[Account], patterns: &[String]) -> Vec<MatchedAccount> {
+    let matcher = SkimMatcherV2::default();
+
     accounts.iter()
-        .filter(|acc| {
+        .filter_map(|acc| {
             let issuer = acc.issuer.as_deref().unwrap_or_default();
             let name = &acc.name;
-            
-            // AND 邏輯：每個關鍵字都必須在任一欄位中找到匹配
-            patterns.iter().all(|p| {
-                fuzzy_match(p, issuer) || fuzzy_match(p, name)
+
+            let mut total_score = 0;
+            let mut all_issuer_indices = Vec::new();
+            let mut all_name_indices = Vec::new();
+
+            for p in patterns {
+                let issuer_res = matcher.fuzzy_indices(issuer, p);
+                let name_res = matcher.fuzzy_indices(name, p);
+
+                match (issuer_res, name_res) {
+                    (Some((s1, mut i1)), Some((s2, mut i2))) => {
+                        total_score += s1.max(s2);
+                        all_issuer_indices.append(&mut i1);
+                        all_name_indices.append(&mut i2);
+                    }
+                    (Some((s, mut i)), None) => {
+                        total_score += s;
+                        all_issuer_indices.append(&mut i);
+                    }
+                    (None, Some((s, mut i))) => {
+                        total_score += s;
+                        all_name_indices.append(&mut i);
+                    }
+                    (None, None) => return None,
+                }
+            }
+
+            all_issuer_indices.sort_unstable();
+            all_issuer_indices.dedup();
+            all_name_indices.sort_unstable();
+            all_name_indices.dedup();
+
+            Some(MatchedAccount {
+                account: acc.clone(),
+                score: total_score,
+                issuer_indices: all_issuer_indices,
+                name_indices: all_name_indices,
             })
         })
-        .cloned()
         .collect()
 }
 

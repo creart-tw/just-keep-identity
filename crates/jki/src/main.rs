@@ -4,13 +4,14 @@ use jki_core::{
     generate_otp, paths::JkiPath,
     Account, AccountSecret, acquire_master_key, decrypt_with_master_key, search_accounts,
     TerminalInteractor, keychain::KeyringStore, AuthSource,
-    JkiCoreError,
+    JkiCoreError, MatchedAccount,
 };
 use std::fs;
 use std::process;
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use anyhow::{Context, anyhow};
+use console::style;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -122,20 +123,38 @@ fn handle_output(data: String, label: String, source: &str, data_type: &str, std
     }
 }
 
+fn render_highlighted(text: &str, indices: &[usize]) -> String {
+    let mut result = String::new();
+    let indices_set: std::collections::HashSet<_> = indices.iter().collect();
+    for (i, c) in text.chars().enumerate() {
+        if indices_set.contains(&i) {
+            result.push_str(&style(c.to_string()).cyan().bold().to_string());
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
 fn resolve_target(
     patterns: &[String],
     has_double_dash: bool,
     accounts: &[Account],
     list_mode: bool,
     quiet: bool,
-) -> (Vec<Account>, Option<Account>) {
+) -> (Vec<MatchedAccount>, Option<Account>) {
     if has_double_dash {
         let results = if patterns.is_empty() {
-            accounts.to_vec()
+            accounts.iter().map(|acc| MatchedAccount {
+                account: acc.clone(),
+                score: 0,
+                issuer_indices: vec![],
+                name_indices: vec![],
+            }).collect()
         } else {
             search_accounts(accounts, patterns)
         };
-        let target = if results.len() == 1 && !list_mode { Some(results[0].clone()) } else { None };
+        let target = if results.len() == 1 && !list_mode { Some(results[0].account.clone()) } else { None };
         (results, target)
     } else {
         let search_terms = patterns.to_vec();
@@ -154,41 +173,49 @@ fn resolve_target(
             Some(idx) => {
                 let mut terms_without_idx = search_terms.clone();
                 terms_without_idx.pop();
-                
+
                 let results_without_idx = if terms_without_idx.is_empty() {
-                    accounts.to_vec()
+                    accounts.iter().map(|acc| MatchedAccount {
+                        account: acc.clone(),
+                        score: 0,
+                        issuer_indices: vec![],
+                        name_indices: vec![],
+                    }).collect::<Vec<_>>()
                 } else {
                     search_accounts(accounts, &terms_without_idx)
                 };
 
                 if idx >= 1 && idx <= results_without_idx.len() {
-                    if terms_without_idx.is_empty() {
-                        let pattern_matches = search_accounts(accounts, patterns);
-                        if !pattern_matches.is_empty() && !quiet {
-                            eprintln!("Note: Pattern matches found. Use 'jki -- {}' to search instead.", patterns[0]);
-                        }
-                    }
-                    let selected = results_without_idx[idx - 1].clone();
-                    let results = results_without_idx.clone();
+                    let selected = results_without_idx[idx - 1].account.clone();
                     let target = if !list_mode { Some(selected) } else { None };
-                    (results, target)
+                    (results_without_idx, target)
                 } else {
                     let results = if patterns.is_empty() {
-                        accounts.to_vec()
+                        accounts.iter().map(|acc| MatchedAccount {
+                            account: acc.clone(),
+                            score: 0,
+                            issuer_indices: vec![],
+                            name_indices: vec![],
+                        }).collect()
                     } else {
                         search_accounts(accounts, patterns)
                     };
-                    let target = if results.len() == 1 && !list_mode { Some(results[0].clone()) } else { None };
+                    let target = if results.len() == 1 && !list_mode { Some(results[0].account.clone()) } else { None };
                     (results, target)
                 }
             }
             None => {
                 let results = if patterns.is_empty() {
-                    accounts.to_vec()
+                    accounts.iter().map(|acc| MatchedAccount {
+                        account: acc.clone(),
+                        score: 0,
+                        issuer_indices: vec![],
+                        name_indices: vec![],
+                    }).collect()
                 } else {
                     search_accounts(accounts, patterns)
                 };
-                let target = if results.len() == 1 && !list_mode { Some(results[0].clone()) } else { None };
+                let target = if results.len() == 1 && !list_mode { Some(results[0].account.clone()) } else { None };
                 (results, target)
             }
         }
@@ -250,8 +277,15 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             if !cli.quiet {
                 let header = if patterns.is_empty() { "Accounts" } else { "Matches" };
                 eprintln!("{}:", header);
-                for (i, acc) in initial_results.iter().enumerate() {
-                    println!("{:2}) {}{}", i + 1, acc.issuer.as_deref().map(|s| format!("[{}] ", s)).unwrap_or_default(), acc.name);
+                for (i, matched) in initial_results.iter().enumerate() {
+                    let acc = &matched.account;
+                    let issuer_str = if let Some(ref s) = acc.issuer {
+                        format!("[{}] ", render_highlighted(s, &matched.issuer_indices))
+                    } else {
+                        "".to_string()
+                    };
+                    let name_str = render_highlighted(&acc.name, &matched.name_indices);
+                    println!("{:2}) {}{}", i + 1, issuer_str, name_str);
                 }
             }
             return Ok(());
@@ -259,8 +293,15 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 
         if !cli.quiet {
             eprintln!("Ambiguous results (found {} matches):", initial_results.len());
-            for (i, acc) in initial_results.iter().enumerate() {
-                println!("{:2}) {}{}", i + 1, acc.issuer.as_deref().map(|s| format!("[{}] ", s)).unwrap_or_default(), acc.name);
+            for (i, matched) in initial_results.iter().enumerate() {
+                let acc = &matched.account;
+                let issuer_str = if let Some(ref s) = acc.issuer {
+                    format!("[{}] ", render_highlighted(s, &matched.issuer_indices))
+                } else {
+                    "".to_string()
+                };
+                let name_str = render_highlighted(&acc.name, &matched.name_indices);
+                println!("{:2}) {}{}", i + 1, issuer_str, name_str);
             }
             eprintln!("\n[Tip] Be more specific, or use 'jki <pattern> <index>' to select.");
         }
