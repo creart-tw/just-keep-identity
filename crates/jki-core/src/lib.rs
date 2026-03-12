@@ -377,7 +377,7 @@ pub enum AuthSource {
 pub fn acquire_master_key(
     source: AuthSource,
     interactor: &dyn Interactor,
-    _secret_store: Option<&dyn keychain::SecretStore>,
+    secret_store: Option<&dyn keychain::SecretStore>,
 ) -> Result<SecretString> {
     use crate::paths::JkiPath;
 
@@ -390,7 +390,7 @@ pub fn acquire_master_key(
 
             // 2. Try Secret Store (Keychain/Keyring)
             #[cfg(feature = "keychain")]
-            if let Some(store) = _secret_store {
+            if let Some(store) = secret_store {
                 if let Ok(key) = store.get_secret("jki", "master_key") {
                     return Ok(key);
                 }
