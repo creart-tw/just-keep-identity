@@ -14,13 +14,18 @@ APP_RESOURCES = $(APP_CONTENTS)/Resources
 ICON_SET = $(TARGET_DIR)/icon.iconset
 
 # Binaries
-BINS = jki jkim jki-agent
+CORE_BINS = jki jkim
+AGENT_BINS = jki-agent
 
 all: help
 
-## release: Build release binaries
+## release: Build all release binaries (Core + Agent)
 release:
 	cargo build --release --workspace
+
+## release-core: Build only core release binaries (jki, jkim)
+release-core:
+	cargo build --release -p jki -p jkim
 
 ## dev: Build debug binaries or run cargo watch (if installed)
 dev:
@@ -59,9 +64,13 @@ snapshot-clean:
 	@find crates -name "*.stable" -delete
 	@echo "Cleanup complete."
 
-## install: Build and deploy binaries using install.sh
+## install: Build and deploy ALL binaries using install.sh
 install:
 	./install.sh
+
+## install-core: Build and deploy ONLY CORE binaries (jki, jkim)
+install-core:
+	./install.sh --core-only
 
 ## bundle: Create a macOS app bundle for jki-agent
 bundle: release bundle-icon bundle-app

@@ -4,6 +4,15 @@
 
 ---
 
+## **0. 系統支援與開發狀態 (Platform Support)**
+
+本專案目前處於 **v0.1.0-alpha** 階段：
+*   **首選平台 (Optimized)**: **macOS (Apple Silicon/Intel)**。
+*   **實驗性支援 (Experimental)**: Linux (Ubuntu/Debian) 與 Windows Native。
+*   **已知限制**: 在非 macOS 平台上，`jki-agent` 的背景化行為與系統匣圖示可能存在異常。
+
+---
+
 ## **1. 全域旗標 (Global Flags)**
 
 適用於所有 `jki` 與 `jkim` 指令：

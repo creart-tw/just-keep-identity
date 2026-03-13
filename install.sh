@@ -7,12 +7,14 @@ set -e
 INSTALL_DIR="${HOME}/.local/bin"
 SILENT=false
 UPDATE_PATH=true
+CORE_ONLY=false
 
 # Parse arguments
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         --silent) SILENT=true; UPDATE_PATH=false ;;
         --no-path) UPDATE_PATH=false ;;
+        --core-only) CORE_ONLY=true ;;
         --install-dir) INSTALL_DIR="$2"; shift ;;
         *) echo "Unknown parameter: $1"; exit 1 ;;
     esac
@@ -28,14 +30,14 @@ if ! command -v cargo &> /dev/null; then
 fi
 
 # Build
-echo "Building release binaries..."
-cargo build --release --workspace
-
-# Create install directory
-mkdir -p "$INSTALL_DIR"
-
-# Install binaries
-BINS=("jki" "jkim" "jki-agent")
+echo "Building binaries..."
+if [ "$CORE_ONLY" = true ]; then
+    cargo build --release -p jki -p jkim
+    BINS=("jki" "jkim")
+else
+    cargo build --release --workspace
+    BINS=("jki" "jkim" "jki-agent")
+fi
 for bin in "${BINS[@]}"; do
     if [ -f "target/release/$bin" ]; then
         echo "Installing $bin to $INSTALL_DIR..."
