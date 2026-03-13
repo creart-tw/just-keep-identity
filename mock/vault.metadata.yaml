@@ -1,0 +1,22 @@
+accounts:
+- id: 58d7a957-6ad7-48b9-9dab-1defce41596a
+  name: alice.dev@gmail.com
+  issuer: Google
+  account_type: Standard
+- id: f5399bb9-e77b-4cd2-b9c8-acb904acb30c
+  name: code-master
+  issuer: GitHub
+  account_type: Standard
+- id: d35bdce3-2bab-45b6-8abb-6413707331ef
+  name: admin-prod
+  issuer: AWS
+  account_type: Standard
+- id: e555e97a-4ca0-404e-84f2-3b2fe856aa1a
+  name: jki-power-user
+  issuer: OpenAI
+  account_type: Standard
+- id: 37ce923d-38e7-41a8-86d3-9b81312c83a5
+  name: ops-relay
+  issuer: Cloudflare
+  account_type: Standard
+version: 1

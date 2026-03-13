@@ -10,8 +10,8 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = ["Just Keep Identity Team"]
+authors = ["Li-chih Wu <lichihwu@gmail.com>"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/your-username/just-keep-identity"
-homepage = "https://github.com/your-username/just-keep-identity"
-description = "JK Suite 極速 MFA 數位金庫 - Just Keep Identity (jki)"
+repository = "https://github.com/creart-tw/just-keep-identity"
+homepage = "https://github.com/creart-tw/just-keep-identity"
+description = "JK Suite: High-speed MFA & Identity Session Manager for CLI Power Users"

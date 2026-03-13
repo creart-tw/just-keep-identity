@@ -1,55 +1,68 @@
 # Just Keep Identity (jki)
 > **Extreme speed MFA & Identity Session Manager for CLI Power Users.**
 
-`jki` 是一個專為工程師設計的身份授權工具。我們不只是要管理 TOTP，我們是要在不離開終端機的前提下，以「毫秒級」的速度完成身份驗證。
+![JKI Demo](docs/assets/demo.gif)
 
-## 核心哲學 (Philosophy)
+[繁體中文](README.zh-TW.md)
 
-*   **極速感 (Velocity)**: 查詢器 Cold Start < 3ms。當你需要 OTP 時，它已經在你的剪貼簿裡了。
-*   **Session 管理**: 透過背景 Agent 快取解密狀態，規避高昂的 KDF 開銷，實現「一次解鎖，全域極速」。
-*   **認證隔離**: 
-    *   **jki-agent** 負責整合系統 Keyring，實現背景自動化。
-    *   **jki / jkim** 在獨立運作時保持純粹，僅透過檔案或直接輸入進行認證。
-*   **人體工學 (Ergonomics)**: 專門優化的 **Micro-Roll** 指令集 (`j-k-i`)，單手即可完成查詢。
-*   **可視化控制**: 在 macOS/Windows 提供選單列圖示，一眼看穿金庫狀態，隨手即可 Lock 或 Quit。
+`jki` is an identity authorization tool designed specifically for engineers. It's not just about managing TOTP; it's about completing authentication at "millisecond" speeds without ever leaving your terminal.
 
-## 技術架構 (Technical DNA)
+## 🚀 Core Philosophy
 
-`jki` 採用 Rust 構建，追求極致的穩定性與安全性：
+*   **Extreme Velocity**: Search and copy in < 3ms. By the time you need the OTP, it's already in your clipboard.
+*   **Fuzzy Intelligence**: Advanced fuzzy search with character highlighting. Locate accounts instantly even if you don't remember the exact name.
+*   **Smart Agent**: Intelligent background agent supporting auto-unlock for plaintext vaults and active disk synchronization (Active Reload).
+*   **Physical Isolation**: Built on `age` encryption. All secrets stay on your local disk or your private Git repo—zero cloud dependency.
+*   **CLI Ergonomics**: Optimized Micro-Roll command set (`j-k-i`), allowing for one-handed operation.
 
-*   **智慧型代理 (Intelligent Agent)**: `jki-agent` 持有解密後的記憶體快取。它是系統中唯一與 OS Keyring 互動的門戶。
-*   **雙模金庫 (Dual-Mode Vault)**: 
-    *   `Plaintext Mode`: 追求極速，讀取本地加密環境下的明文快取。
-    *   `Encrypted Mode`: 採用 `age` 加密，適合 Git 同步與長期儲存。
-*   **Unix-Friendly**: 完美的管道支援 (`stdout -`)，輕鬆與 `ssh`, `git`, `kubectl` 等工具整合。
+## 🧬 Technical DNA
 
-## 快速開始 (Quick Start)
+Built with Rust for extreme stability and security:
+
+*   **Intelligent Agent**: `jki-agent` manages decrypted memory cache. It's the secure gateway to OS Keyring integration.
+*   **Dual-Mode Vault**:
+    *   `Plaintext Mode`: Maximum speed, reads local plaintext cache in secure environments.
+    *   `Encrypted Mode`: AES-GCM encryption via `age`, perfect for Git synchronization and long-term storage.
+*   **Unix-Friendly**: Perfect pipe support (`stdout -`), easily integrates with `ssh`, `git`, `kubectl`, and other CLI tools.
+
+## 🛠 Quick Start
 
 ```bash
-# 查詢並複製 OTP (優先向 Agent 要，若無 Agent 則支援 master.key 或直接問密碼)
+# Query and copy OTP (Priority: Agent -> Keyfile -> Password Prompt)
 jki github
 
-# 智慧過濾：搜尋 google 並直接選擇第 2 個結果
+# Smart Filtering: Search for "google" and select the 2nd result
 jki google 2
 
-# 驗證過濾結果：列出搜尋結果而不執行
-jki google 2 -l
+# Force List Mode: View matches without executing
+jki google -l
 
-# 快速同步金庫
-jkim sync
+# Fast Vault Sync (Git commit/pull/push)
+jkim git sync
 ```
 
-### 智慧過濾與選擇 (Smart Filtering & Selection)
+### Smart Filtering & Selection
 
-`jki` 遵循「過濾 (Filter) -> 動作 (Action)」的邏輯鏈，讓你在複雜的帳號清單中如魚得水：
+`jki` follows a "Filter -> Action" logic chain, making it effortless to navigate complex account lists:
 
-1.  **多重過濾**: `jki [PATTERNS]... [INDEX]`
-    *   `jki u`：列出所有符合 `u` 的帳號 (如 Uber, Uplay)。
-    *   `jki u 2`：直接獲取 `u` 搜尋結果中第 2 項的 OTP。
-2.  **清單模式 (`-l, --list`)**: 
-    *   任何時候加上 `-l` 都會將 `jki` 切換為「只列出、不執行」模式。
-    *   這對於在大量結果中確認索引號 (`INDEX`) 非常有用。
-3.  **無感報錯**: 搜尋結果不唯一時不再視為錯誤，而是優雅地列出候選清單並提示你如何精確選擇。
+1.  **Multi-Pattern Filtering**: `jki [PATTERNS]... [INDEX]`
+    *   `jki u`: Lists all accounts matching `u` (e.g., Uber, Uplay).
+    *   `jki u 2`: Directly acquires the OTP for the 2nd item in the results.
+2.  **List Mode (`-l, --list`)**:
+    *   Appended `-l` switches `jki` to "View Only" mode.
+    *   Extremely useful for verifying index numbers in large result sets.
+3.  **Graceful Feedback**: Ambiguous results are no longer errors; JKI elegantly lists candidates with score gaps to guide your next keystroke.
+
+---
+
+## 📦 Installation (macOS)
+
+```bash
+# Clone and Install
+git clone https://github.com/creart-tw/just-keep-identity.git
+cd just-keep-identity
+make install
+```
 
 ---
 

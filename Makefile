@@ -75,6 +75,12 @@ install-core:
 ## bundle: Create a macOS app bundle for jki-agent
 bundle: release bundle-icon bundle-app
 
+## demo: Record a demo GIF using VHS (Requires vhs installed)
+demo:
+	@echo "Recording demo using mock data..."
+	@vhs < docs/demo.tape
+	@echo "Demo recorded to docs/assets/demo.gif"
+
 bundle-icon:
 	@echo "Creating icon.icns..."
 	@mkdir -p $(ICON_SET)
