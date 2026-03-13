@@ -23,6 +23,7 @@ clap_complete = "4.4"
 crossterm = "0.27"
 copypasta = "0.10"
 termimad = "0.31"
+serde_yaml = "0.9.34"
 
 [dev-dependencies]
 serial_test = "3"

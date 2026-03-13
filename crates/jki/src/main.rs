@@ -254,7 +254,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     }
 
     let meta_content = fs::read_to_string(&meta_path).context("Failed to read metadata")?;
-    let meta_data: MetadataFile = serde_json::from_str(&meta_content).context("Metadata parse error")?;
+    let meta_data: MetadataFile = serde_yaml::from_str(&meta_content).context("Metadata parse error")?;
 
     let raw_args: Vec<String> = std::env::args().collect();
     let has_double_dash = raw_args.iter().any(|arg| arg == "--");
@@ -552,7 +552,7 @@ mod tests {
                 algorithm: "SHA1".to_string(),
             }]
         };
-        fs::write(home.join("vault.metadata.json"), serde_json::to_string(&metadata).unwrap()).unwrap();
+        fs::write(home.join("vault.metadata.yaml"), serde_yaml::to_string(&metadata).unwrap()).unwrap();
 
         let mut secrets_map = HashMap::new();
         secrets_map.insert(acc_id.to_string(), AccountSecret {
@@ -612,7 +612,7 @@ mod tests {
                 algorithm: "SHA1".to_string(),
             }]
         };
-        fs::write(home.join("vault.metadata.json"), serde_json::to_string(&metadata).unwrap()).unwrap();
+        fs::write(home.join("vault.metadata.yaml"), serde_yaml::to_string(&metadata).unwrap()).unwrap();
 
         let mut secrets_map = HashMap::new();
         secrets_map.insert(acc_id.to_string(), AccountSecret {
@@ -671,7 +671,7 @@ mod tests {
                 algorithm: "SHA1".to_string(),
             }]
         };
-        fs::write(home.join("vault.metadata.json"), serde_json::to_string(&metadata).unwrap()).unwrap();
+        fs::write(home.join("vault.metadata.yaml"), serde_yaml::to_string(&metadata).unwrap()).unwrap();
 
         let mut secrets_map = HashMap::new();
         secrets_map.insert(acc_id.to_string(), AccountSecret {
@@ -730,7 +730,7 @@ mod tests {
                 algorithm: "SHA1".to_string(),
             }]
         };
-        fs::write(home.join("vault.metadata.json"), serde_json::to_string(&metadata).unwrap()).unwrap();
+        fs::write(home.join("vault.metadata.yaml"), serde_yaml::to_string(&metadata).unwrap()).unwrap();
 
         let mut plaintext_map = HashMap::new();
         plaintext_map.insert(acc_id.to_string(), AccountSecret {

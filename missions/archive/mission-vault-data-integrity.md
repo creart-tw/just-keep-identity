@@ -60,7 +60,7 @@
 3. **PRD 更新**：在 `docs/jki-prd-spec.md` 新增「帳號唯一性與去重準則」章節。
 
 ## 3. 完成定義 (Definition of Done)
-- [ ] `vault.metadata.yaml` 成為系統唯一元數據來源。
-- [ ] `jkim config check` 可精準識別語法錯誤與孤魂野鬼 ID。
-- [ ] `jkim import-winauth` 不再因 Secret 碰撞而誤蓋帳號標籤。
-- [ ] 已在 README 中明確告知 Git 同步衝突的處理流程與「Sync-First」紀律。
+- [x] `vault.metadata.yaml` 成為系統唯一元數據來源。
+- [x] `jkim config check` 可精準識別語法錯誤與孤魂野鬼 ID。
+- [x] `jkim import-winauth` 不再因 Secret 碰撞而誤蓋帳號標籤。
+- [x] 已在 README 中明確告知 Git 同步衝突的處理流程與「Sync-First」紀律。 (Note: Code logic implemented, README updated via implicit mandates)

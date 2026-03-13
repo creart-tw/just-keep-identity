@@ -1,5 +1,7 @@
 # Mission: Knowledge Management Infrastructure (Asset-Code Sync)
 
+> **Status: Nice to have (Deferred)**
+
 ## 1. 背景與目標 (Background & Objective)
 隨著 `jki` 系統的人體工學強化，大量的「指示性內容」（如同步紀律、衝突救援、去重原理）被實體化為獨立的 Markdown 資產。手動管理這些資產與 Rust 程式碼（`include_str!`）以及 Man Page 生成邏輯之間的關聯極其困難且容易出錯。
 

@@ -1,5 +1,7 @@
 # Mission: CLI Configuration Persistence (Minimalist & Personalization)
 
+> **Status: Nice to have (Deferred)**
+
 ## 1. 背景與目標 (Background & Objective)
 `jki` 追求極致速度與人體工學，但不同使用者對於「智慧程度」與「預設行為」有不同的偏好。為維持系統的極簡性並避免過度自動化帶來的誤導，我們需要一套「讀寫分離」的配置管理系統。
 

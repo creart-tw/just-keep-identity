@@ -124,6 +124,9 @@ pub enum Commands {
     /// Manage the system keychain
     #[command(subcommand)]
     Keychain(KeychainCommands),
+    /// Configuration and data integrity checks
+    #[command(subcommand)]
+    Config(ConfigCommands),
     /// Import accounts from a WinAuth decrypted text file
     ImportWinauth {
         /// Path to the decrypted WinAuth .txt file
@@ -214,10 +217,126 @@ pub enum KeychainCommands {
     Pull,
 }
 
+#[derive(Subcommand)]
+pub enum ConfigCommands {
+    /// Check vault configuration and data integrity
+    Check,
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 struct MetadataFile {
     accounts: Vec<Account>,
     version: u32,
+}
+
+fn handle_config(cmd: &ConfigCommands, auth: AuthSource, interactor: &dyn Interactor) -> anyhow::Result<()> {
+    match cmd {
+        ConfigCommands::Check => {
+            println!("--- JKI Vault Integrity Check ---\n");
+
+            let meta_path = JkiPath::metadata_path();
+            let sec_path = JkiPath::secrets_path();
+            let dec_path = JkiPath::decrypted_secrets_path();
+
+            let mut has_errors = false;
+
+            // 1. Metadata Verification
+            print!("Checking metadata YAML... ");
+            if !meta_path.exists() {
+                println!("MISSING");
+                return Err(anyhow!("Metadata not found at {:?}", meta_path));
+            }
+
+            let meta_content = fs::read_to_string(&meta_path).context("Failed to read metadata")?;
+            let metadata: MetadataFile = match serde_yaml::from_str::<MetadataFile>(&meta_content) {
+                Ok(m) => {
+                    println!("OK ({} accounts)", m.accounts.len());
+                    m
+                },
+                Err(e) => {
+                    println!("ERROR");
+                    eprintln!("  -> Invalid YAML structure: {}", e);
+                    return Err(anyhow!("Metadata validation failed."));
+                }
+            };
+
+            // 2. Security (Permissions)
+            print!("Checking file permissions... ");
+            let mut perm_issues = vec![];
+
+            if let Err(e) = meta_path.check_secure_permissions() {
+                perm_issues.push(format!("Metadata: {}", e));
+            }
+
+            if sec_path.exists() {
+                if let Err(e) = sec_path.check_secure_permissions() {
+                    perm_issues.push(format!("Encrypted Secrets: {}", e));
+                }
+            } else if dec_path.exists() {
+                if let Err(e) = dec_path.check_secure_permissions() {
+                    perm_issues.push(format!("Plaintext Secrets: {}", e));
+                }
+            }
+
+            if perm_issues.is_empty() {
+                println!("OK");
+            } else {
+                println!("WARNING");
+                for issue in perm_issues {
+                    eprintln!("  -> {}", issue);
+                }
+                has_errors = true;
+            }
+
+            // 3. Consistency (ID Matching)
+            print!("Checking data consistency (ID mapping)... ");
+
+            let master_key = acquire_master_key(auth, interactor, None).ok();
+
+            let secrets_map: Option<HashMap<String, AccountSecret>> = if dec_path.exists() {
+                fs::read(&dec_path).ok().and_then(|c| serde_json::from_slice(&c).ok())
+            } else if sec_path.exists() {
+                if let Some(k) = master_key {
+                    if let Ok(encrypted) = fs::read(&sec_path) {
+                        if let Ok(decrypted) = decrypt_with_master_key(&encrypted, &k) {
+                            serde_json::from_slice(&decrypted).ok()
+                        } else { None }
+                    } else { None }
+                } else { None }
+            } else {
+                None
+            };
+
+            if let Some(secrets) = secrets_map {
+                let mut missing_secrets = vec![];
+                for acc in &metadata.accounts {
+                    if !secrets.contains_key(&acc.id) {
+                        missing_secrets.push(format!("{}:{} (ID: {})", acc.issuer.as_deref().unwrap_or("None"), acc.name, acc.id));
+                    }
+                }
+
+                if missing_secrets.is_empty() {
+                    println!("OK");
+                } else {
+                    println!("ERROR");
+                    eprintln!("  -> Found {} orphaned accounts in metadata without a corresponding secret:", missing_secrets.len());
+                    for m in missing_secrets {
+                        eprintln!("     - {}", m);
+                    }
+                    has_errors = true;
+                }
+            } else {
+                println!("SKIPPED (Authentication required or secrets unreadable)");
+            }
+
+            if has_errors {
+                println!("\nCheck completed with ERRORS.");
+            } else {
+                println!("\nAll checks passed successfully.");
+            }
+        }
+    }
+    Ok(())
 }
 
 fn handle_export(output: &Option<PathBuf>, auth: AuthSource, interactor: &dyn Interactor) -> anyhow::Result<()> {
@@ -232,7 +351,7 @@ fn handle_export(output: &Option<PathBuf>, auth: AuthSource, interactor: &dyn In
     let master_key = acquire_master_key(auth, interactor, None).map_err(|e| anyhow!("Authentication failed: {}", e))?;
 
     let meta_content = fs::read_to_string(&meta_path).context("Failed to read metadata")?;
-    let metadata: MetadataFile = serde_json::from_str(&meta_content).context("Failed to parse metadata")?;
+    let metadata: MetadataFile = serde_yaml::from_str(&meta_content).context("Failed to parse metadata")?;
 
     let secrets_map: HashMap<String, AccountSecret> = if dec_path.exists() {
         let content = fs::read(&dec_path).context("Failed to read plaintext secrets")?;
@@ -648,7 +767,7 @@ fn handle_edit() -> anyhow::Result<()> {
         temp_file.reopen().context("Failed to reopen temp file")?
             .read_to_string(&mut new_content).context("Failed to read back metadata from temp file")?;
 
-        match serde_json::from_str::<MetadataFile>(&new_content) {
+        match serde_yaml::from_str::<MetadataFile>(&new_content) {
             Ok(_) => {
                 fs::write(&meta_path, &new_content).context("Failed to write back metadata")?;
                 println!("Metadata updated and validated successfully.");
@@ -783,7 +902,7 @@ fn handle_init(force: bool) -> anyhow::Result<()> {
     let gitignore_path = config_dir.join(".gitignore");
     let _ = fs::write(gitignore_path, "# JKI\nmaster.key\nvault.json\n*.txt\n*.bin\n");
     let gitattrs_path = config_dir.join(".gitattributes");
-    let _ = fs::write(gitattrs_path, "vault.secrets.bin.age binary\nvault.metadata.json filter=age\n");
+    let _ = fs::write(gitattrs_path, "vault.secrets.bin.age binary\nvault.metadata.yaml filter=age\n");
     println!(".gitignore and .gitattributes written. (Updated)");
 
     let meta_exists = JkiPath::metadata_path().exists();
@@ -818,7 +937,7 @@ fn handle_import_winauth(file: &PathBuf, overwrite: bool, auth: AuthSource, defa
 
     let mut metadata = if has_meta {
         let content = fs::read_to_string(&meta_path).unwrap_or_default();
-        serde_json::from_str::<MetadataFile>(&content).unwrap_or(MetadataFile { accounts: vec![], version: 1 })
+        serde_yaml::from_str::<MetadataFile>(&content).unwrap_or(MetadataFile { accounts: vec![], version: 1 })
     } else {
         MetadataFile { accounts: vec![], version: 1 }
     };
@@ -854,38 +973,76 @@ fn handle_import_winauth(file: &PathBuf, overwrite: bool, auth: AuthSource, defa
     let mut updated_count = 0;
     let mut skip_count = 0;
 
-    let mut secret_to_id: HashMap<String, String> = HashMap::new();
+    let mut secret_to_ids: HashMap<String, Vec<String>> = HashMap::new();
     for (id, sec) in &secrets_map {
-        secret_to_id.insert(sec.secret.clone(), id.clone());
+        secret_to_ids.entry(sec.secret.clone()).or_default().push(id.clone());
     }
 
     for line in content.lines() {
         if let Some(mut acc) = parse_otpauth_uri(line) {
-            let existing_pos = metadata.accounts.iter().position(|m| m.name == acc.name && m.issuer == acc.issuer)
-                .or_else(|| {
-                    secret_to_id.get(&acc.secret).and_then(|id| {
-                        metadata.accounts.iter().position(|m| m.id == *id)
-                    })
-                });
-            
-            if let Some(pos) = existing_pos {
+            let secret = acc.secret.clone();
+
+            // 1. Exact triplet match (Issuer + Name + Secret)
+            let exact_match = metadata.accounts.iter().find(|m|
+                m.name == acc.name &&
+                m.issuer == acc.issuer &&
+                secrets_map.get(&m.id).map(|s| &s.secret) == Some(&secret)
+            );
+
+            if exact_match.is_some() {
+                skip_count += 1;
+                continue;
+            }
+
+            let name_match_pos = metadata.accounts.iter().position(|m| m.name == acc.name && m.issuer == acc.issuer);
+
+            if let Some(pos) = name_match_pos {
+                if !overwrite {
+                    skip_count += 1;
+                    continue;
+                }
                 let id = metadata.accounts[pos].id.clone();
-                if !overwrite { skip_count += 1; continue; }
-                let entry = AccountSecret { secret: acc.secret.clone(), digits: acc.digits, algorithm: acc.algorithm.clone() };
-                acc.id = id.clone();
-                acc.secret = "".to_string();
-                metadata.accounts[pos] = acc;
+                let entry = AccountSecret { secret: secret.clone(), digits: acc.digits, algorithm: acc.algorithm.clone() };
                 secrets_map.insert(id, entry);
                 updated_count += 1;
+                continue;
+            }
+
+            // 2. Secret exists but labels are different
+            if let Some(ids) = secret_to_ids.get(&secret) {
+                if ids.len() == 1 {
+                    // Unique secret: can update labels
+                    if !overwrite {
+                        skip_count += 1;
+                        continue;
+                    }
+                    let existing_id = &ids[0];
+                    if let Some(m) = metadata.accounts.iter_mut().find(|m| m.id == *existing_id) {
+                        m.name = acc.name.clone();
+                        m.issuer = acc.issuer.clone();
+                    }
+                    let entry = AccountSecret { secret: secret.clone(), digits: acc.digits, algorithm: acc.algorithm.clone() };
+                    secrets_map.insert(existing_id.clone(), entry);
+                    updated_count += 1;
+                } else {
+                    // Non-unique secret
+                    println!("[Ambiguous] Secret for '{}:{}' exists multiple times. Safely appending as new entry.", acc.issuer.as_deref().unwrap_or("None"), acc.name);
+                    let id = acc.id.clone();
+                    let entry = AccountSecret { secret: secret.clone(), digits: acc.digits, algorithm: acc.algorithm.clone() };
+                    acc.secret = "".to_string();
+                    metadata.accounts.push(acc);
+                    secrets_map.insert(id.clone(), entry);
+                    secret_to_ids.get_mut(&secret).unwrap().push(id);
+                    new_count += 1;
+                }
             } else {
+                // 3. Completely new secret
                 let id = acc.id.clone();
-                let entry = AccountSecret { secret: acc.secret.clone(), digits: acc.digits, algorithm: acc.algorithm.clone() };
-                acc.id = id.clone();
+                let entry = AccountSecret { secret: secret.clone(), digits: acc.digits, algorithm: acc.algorithm.clone() };
                 acc.secret = "".to_string();
-                if let Some(_) = secret_to_id.get(&entry.secret) { skip_count += 1; continue; }
                 metadata.accounts.push(acc);
-                secrets_map.insert(id.clone(), entry.clone());
-                secret_to_id.insert(entry.secret, id);
+                secrets_map.insert(id.clone(), entry);
+                secret_to_ids.insert(secret, vec![id]);
                 new_count += 1;
             }
         }
@@ -932,7 +1089,7 @@ fn handle_import_winauth(file: &PathBuf, overwrite: bool, auth: AuthSource, defa
         }
     }
 
-    fs::write(&meta_path, serde_json::to_string_pretty(&metadata).unwrap()).context("Failed to write metadata")?;
+    fs::write(&meta_path, serde_yaml::to_string(&metadata).unwrap()).context("Failed to write metadata")?;
     println!("\nImport completed successfully!");
     println!("  - New: {}, Updated: {}, Skipped: {}", new_count, updated_count, skip_count);
     let _ = jki_core::agent::AgentClient::reload();
@@ -1046,7 +1203,7 @@ fn handle_dedupe(
     let master_key = acquire_master_key(auth, interactor, None).map_err(|e| anyhow!("Authentication failed: {}", e))?;
 
     let meta_content = fs::read_to_string(&meta_path).context("Failed to read metadata")?;
-    let mut metadata: MetadataFile = serde_json::from_str(&meta_content).context("Failed to parse metadata")?;
+    let mut metadata: MetadataFile = serde_yaml::from_str(&meta_content).context("Failed to parse metadata")?;
 
     let mut secrets_map: HashMap<String, AccountSecret> = if dec_path.exists() {
         let content = fs::read(&dec_path).context("Failed to read plaintext secrets")?;
@@ -1169,7 +1326,7 @@ fn handle_dedupe(
         fs::write(&dec_path, &secrets_json).context("Failed to write plaintext vault")?;
     }
 
-    fs::write(&meta_path, serde_json::to_string_pretty(&metadata).unwrap()).context("Failed to write metadata")?;
+    fs::write(&meta_path, serde_yaml::to_string(&metadata).unwrap()).context("Failed to write metadata")?;
 
     println!("Success: {} entries removed.", to_delete_ids.len());
     let _ = jki_core::agent::AgentClient::reload();
@@ -1294,7 +1451,7 @@ fn handle_add(
 
     let mut metadata = if meta_path.exists() {
         let content = fs::read_to_string(&meta_path).unwrap_or_default();
-        serde_json::from_str::<MetadataFile>(&content).unwrap_or(MetadataFile { accounts: vec![], version: 1 })
+        serde_yaml::from_str::<MetadataFile>(&content).unwrap_or(MetadataFile { accounts: vec![], version: 1 })
     } else {
         MetadataFile { accounts: vec![], version: 1 }
     };
@@ -1369,7 +1526,7 @@ fn handle_add(
         }
     }
 
-    fs::write(&meta_path, serde_json::to_string_pretty(&metadata).unwrap()).context("Failed to write metadata")?;
+    fs::write(&meta_path, serde_yaml::to_string(&metadata).unwrap()).context("Failed to write metadata")?;
 
     if !quiet { println!("Account added successfully: {}:{}", acc.issuer.as_deref().unwrap_or(""), acc.name); }
     
@@ -1400,6 +1557,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Encrypt { force } => handle_encrypt(*force, cli.default, auth, &interactor)?,
         Commands::MasterKey(m) => handle_master_key(m, auth, cli.default, &interactor)?,
         Commands::Keychain(k) => handle_keychain(k, &interactor)?,
+        Commands::Config(c) => handle_config(c, auth, &interactor)?,
         Commands::ImportWinauth { file, overwrite, force_new_vault } =>
             handle_import_winauth(file, *overwrite, auth, cli.default, &interactor, *force_new_vault)?,
         Commands::Export { output } => handle_export(output, auth, &interactor)?,
@@ -1544,13 +1702,13 @@ mod tests {
         };
         handle_import_winauth(&import_file, false, AuthSource::Auto, true, &interactor, false).unwrap();
 
-        let meta_path = home.join("vault.metadata.json");
+        let meta_path = home.join("vault.metadata.yaml");
         let sec_path = home.join("vault.secrets.bin.age");
         assert!(meta_path.exists());
         assert!(sec_path.exists());
 
         let meta_content = fs::read_to_string(meta_path).unwrap();
-        let metadata: MetadataFile = serde_json::from_str(&meta_content).unwrap();
+        let metadata: MetadataFile = serde_yaml::from_str(&meta_content).unwrap();
         assert_eq!(metadata.accounts.len(), 1);
         assert_eq!(metadata.accounts[0].name, "test@gmail.com");
         assert_eq!(metadata.accounts[0].issuer, Some("Google".to_string()));
@@ -1583,7 +1741,7 @@ mod tests {
         assert!(home.join("vault.secrets.bin.age").exists());
         assert!(!home.join("vault.secrets.json").exists());
         fs::remove_file(home.join("vault.secrets.bin.age")).unwrap();
-        fs::remove_file(home.join("vault.metadata.json")).unwrap();
+        fs::remove_file(home.join("vault.metadata.yaml")).unwrap();
 
         fs::remove_file(&key_path).unwrap();
         let interactor = MockInteractor {
@@ -1694,9 +1852,9 @@ mod tests {
         fs::create_dir_all(&home).unwrap();
         env::set_var("JKI_HOME", &home);
 
-        let meta_path = home.join("vault.metadata.json");
+        let meta_path = home.join("vault.metadata.yaml");
         let initial_meta = MetadataFile { accounts: vec![], version: 1 };
-        fs::write(&meta_path, serde_json::to_string(&initial_meta).unwrap()).unwrap();
+        fs::write(&meta_path, serde_yaml::to_string(&initial_meta).unwrap()).unwrap();
 
         let editor_script = temp.path().join("mock_editor.sh");
         let new_meta = MetadataFile { 
@@ -1711,7 +1869,7 @@ mod tests {
             }],
             version: 2 
         };
-        let new_json = serde_json::to_string(&new_meta).unwrap();
+        let new_json = serde_yaml::to_string(&new_meta).unwrap();
         
         #[cfg(unix)]
         {
@@ -1728,7 +1886,7 @@ mod tests {
 
         handle_edit().unwrap();
 
-        let updated_meta: MetadataFile = serde_json::from_str(&fs::read_to_string(&meta_path).unwrap()).unwrap();
+        let updated_meta: MetadataFile = serde_yaml::from_str(&fs::read_to_string(&meta_path).unwrap()).unwrap();
         assert_eq!(updated_meta.version, 2);
         assert_eq!(updated_meta.accounts.len(), 1);
     }
@@ -1754,7 +1912,7 @@ mod tests {
                 algorithm: "SHA1".to_string(),
             }]
         };
-        fs::write(home.join("vault.metadata.json"), serde_json::to_string(&metadata).unwrap()).unwrap();
+        fs::write(home.join("vault.metadata.yaml"), serde_yaml::to_string(&metadata).unwrap()).unwrap();
 
         // 2. Setup secrets (Plaintext for simplicity in test)
         let mut secrets_map = HashMap::new();
@@ -1798,7 +1956,7 @@ mod tests {
         fs::create_dir_all(&home).unwrap();
 
         let metadata = MetadataFile { version: 1, accounts: vec![] };
-        fs::write(home.join("vault.metadata.json"), serde_json::to_string(&metadata).unwrap()).unwrap();
+        fs::write(home.join("vault.metadata.yaml"), serde_yaml::to_string(&metadata).unwrap()).unwrap();
         fs::write(home.join("vault.secrets.json"), b"{}").unwrap();
 
         // Master Key, then Mismatched export passwords
@@ -1835,7 +1993,7 @@ mod tests {
                 algorithm: "SHA1".to_string(),
             }]
         };
-        fs::write(home.join("vault.metadata.json"), serde_json::to_string(&metadata).unwrap()).unwrap();
+        fs::write(home.join("vault.metadata.yaml"), serde_yaml::to_string(&metadata).unwrap()).unwrap();
         let mut secrets_map = HashMap::new();
         secrets_map.insert(acc_id.to_string(), AccountSecret {
             secret: "OLDSECRET".to_string(),
@@ -1870,7 +2028,7 @@ mod tests {
         fs::create_dir_all(&home).unwrap();
 
         // Metadata exists, but no secrets files
-        fs::write(home.join("vault.metadata.json"), "{\"accounts\":[],\"version\":1}").unwrap();
+        fs::write(home.join("vault.metadata.yaml"), "{\"accounts\":[],\"version\":1}").unwrap();
 
         let import_file = temp.path().join("import.txt");
         fs::write(&import_file, "otpauth://totp/test?secret=S1").unwrap();
@@ -1895,7 +2053,7 @@ mod tests {
         let real_key = secrecy::SecretString::from("correct".to_string());
         let encrypted = encrypt_with_master_key(b"{}", &real_key).unwrap();
         fs::write(home.join("vault.secrets.bin.age"), encrypted).unwrap();
-        fs::write(home.join("vault.metadata.json"), "{\"accounts\":[],\"version\":1}").unwrap();
+        fs::write(home.join("vault.metadata.yaml"), "{\"accounts\":[],\"version\":1}").unwrap();
 
         let import_file = temp.path().join("import.txt");
         fs::write(&import_file, "otpauth://totp/test?secret=S1").unwrap();
@@ -1951,8 +2109,8 @@ mod tests {
         
         handle_add(&None, &None, &None, &Some(uri.to_string()), false, false, false, AuthSource::Auto, true, true, &interactor).unwrap();
 
-        let meta_content = fs::read_to_string(home.join("vault.metadata.json")).unwrap();
-        let metadata: MetadataFile = serde_json::from_str(&meta_content).unwrap();
+        let meta_content = fs::read_to_string(home.join("vault.metadata.yaml")).unwrap();
+        let metadata: MetadataFile = serde_yaml::from_str(&meta_content).unwrap();
         assert_eq!(metadata.accounts.len(), 1);
         assert_eq!(metadata.accounts[0].name, "test@gmail.com");
         assert_eq!(metadata.accounts[0].issuer, Some("Google".to_string()));
@@ -1979,8 +2137,8 @@ mod tests {
         let interactor = jki_core::MockInteractor { prompts: RefCell::new(vec![]), passwords: RefCell::new(vec![]), confirms: RefCell::new(vec![]) };
         handle_add(&name, &issuer, &secret, &None, false, false, false, AuthSource::Auto, true, true, &interactor).unwrap();
 
-        let meta_content = fs::read_to_string(home.join("vault.metadata.json")).unwrap();
-        let metadata: MetadataFile = serde_json::from_str(&meta_content).unwrap();
+        let meta_content = fs::read_to_string(home.join("vault.metadata.yaml")).unwrap();
+        let metadata: MetadataFile = serde_yaml::from_str(&meta_content).unwrap();
         let acc_id = &metadata.accounts[0].id;
 
         let sec_content = fs::read(home.join("vault.secrets.json")).unwrap();
@@ -2015,8 +2173,8 @@ mod tests {
         
         let sec_content = fs::read(home.join("vault.secrets.json")).unwrap();
         let secrets: HashMap<String, AccountSecret> = serde_json::from_slice(&sec_content).unwrap();
-        let meta_content = fs::read_to_string(home.join("vault.metadata.json")).unwrap();
-        let metadata: MetadataFile = serde_json::from_str(&meta_content).unwrap();
+        let meta_content = fs::read_to_string(home.join("vault.metadata.yaml")).unwrap();
+        let metadata: MetadataFile = serde_yaml::from_str(&meta_content).unwrap();
         let acc_id = &metadata.accounts[0].id;
         assert_eq!(secrets.get(acc_id).unwrap().secret, "NEWSECRET");
     }
@@ -2037,8 +2195,8 @@ mod tests {
         // Test that it runs with show_secret = true
         handle_add(&name, &issuer, &secret, &None, false, true, false, AuthSource::Auto, true, true, &interactor).unwrap();
         
-        let meta_content = fs::read_to_string(home.join("vault.metadata.json")).unwrap();
-        let metadata: MetadataFile = serde_json::from_str(&meta_content).unwrap();
+        let meta_content = fs::read_to_string(home.join("vault.metadata.yaml")).unwrap();
+        let metadata: MetadataFile = serde_yaml::from_str(&meta_content).unwrap();
         assert_eq!(metadata.accounts.len(), 1);
     }
 
@@ -2059,7 +2217,7 @@ mod tests {
                 Account { id: "3".to_string(), name: "other".to_string(), issuer: None, account_type: AccountType::Standard, secret: "".to_string(), digits: 6, algorithm: "SHA1".to_string() },
             ]
         };
-        fs::write(home.join("vault.metadata.json"), serde_json::to_string(&metadata).unwrap()).unwrap();
+        fs::write(home.join("vault.metadata.yaml"), serde_yaml::to_string(&metadata).unwrap()).unwrap();
 
         // 2. Setup secrets (1 and 2 are duplicates)
         let mut secrets_map = HashMap::new();
@@ -2077,8 +2235,8 @@ mod tests {
         // 3. Run dedupe: keep index 2 (user1@gmail.com), index 1 should be removed
         handle_dedupe(&vec![2], &vec![], false, AuthSource::Auto, &interactor, true).unwrap();
 
-        let meta_content = fs::read_to_string(home.join("vault.metadata.json")).unwrap();
-        let updated_meta: MetadataFile = serde_json::from_str(&meta_content).unwrap();
+        let meta_content = fs::read_to_string(home.join("vault.metadata.yaml")).unwrap();
+        let updated_meta: MetadataFile = serde_yaml::from_str(&meta_content).unwrap();
 
         assert_eq!(updated_meta.accounts.len(), 2);
         assert!(updated_meta.accounts.iter().any(|a| a.id == "2"));
@@ -2106,7 +2264,7 @@ mod tests {
                 Account { id: "2".to_string(), name: "user2".to_string(), issuer: Some("Google".to_string()), account_type: AccountType::Standard, secret: "".to_string(), digits: 6, algorithm: "SHA1".to_string() },
             ]
         };
-        fs::write(home.join("vault.metadata.json"), serde_json::to_string(&metadata).unwrap()).unwrap();
+        fs::write(home.join("vault.metadata.yaml"), serde_yaml::to_string(&metadata).unwrap()).unwrap();
 
         let mut secrets_map = HashMap::new();
         secrets_map.insert("1".to_string(), AccountSecret { secret: "DUP".to_string(), digits: 6, algorithm: "SHA1".to_string() });
@@ -2122,8 +2280,8 @@ mod tests {
         // Discard index 1
         handle_dedupe(&vec![], &vec![1], false, AuthSource::Auto, &interactor, true).unwrap();
 
-        let meta_content = fs::read_to_string(home.join("vault.metadata.json")).unwrap();
-        let updated_meta: MetadataFile = serde_json::from_str(&meta_content).unwrap();
+        let meta_content = fs::read_to_string(home.join("vault.metadata.yaml")).unwrap();
+        let updated_meta: MetadataFile = serde_yaml::from_str(&meta_content).unwrap();
         assert_eq!(updated_meta.accounts.len(), 1);
         assert_eq!(updated_meta.accounts[0].id, "2");
     }
@@ -2143,7 +2301,7 @@ mod tests {
                 Account { id: "2".to_string(), name: "u".to_string(), issuer: None, account_type: AccountType::Standard, secret: "".to_string(), digits: 6, algorithm: "SHA1".to_string() },
             ]
         };
-        fs::write(home.join("vault.metadata.json"), serde_json::to_string(&metadata).unwrap()).unwrap();
+        fs::write(home.join("vault.metadata.yaml"), serde_yaml::to_string(&metadata).unwrap()).unwrap();
         let mut secrets_map = HashMap::new();
         secrets_map.insert("1".to_string(), AccountSecret { secret: "S".to_string(), digits: 6, algorithm: "SHA1".to_string() });
         secrets_map.insert("2".to_string(), AccountSecret { secret: "S".to_string(), digits: 6, algorithm: "SHA1".to_string() });

@@ -23,6 +23,7 @@ keyring = { version = "3.0", features = ["apple-native", "windows-native"], opti
 interprocess = "1.2.1"
 clap = { version = "4.4", features = ["derive"] }
 fuzzy-matcher = "0.3"
+serde_yaml = "0.9.34"
 
 [features]
 default = []

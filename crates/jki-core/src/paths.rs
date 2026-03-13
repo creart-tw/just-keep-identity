@@ -11,7 +11,7 @@ pub trait JkiPathExt {
 }
 
 impl JkiPathExt for Path {
-    fn to_jki_metadata(&self) -> PathBuf { self.join("vault.metadata.json") }
+    fn to_jki_metadata(&self) -> PathBuf { self.join("vault.metadata.yaml") }
     fn to_jki_secrets(&self) -> PathBuf { self.join("vault.secrets.bin.age") }
     fn to_jki_decrypted_secrets(&self) -> PathBuf { self.join("vault.secrets.json") }
     fn to_jki_master_key(&self) -> PathBuf { self.join("master.key") }
@@ -98,7 +98,7 @@ mod tests {
     #[serial]
     fn test_extension_trait() {
         let p = PathBuf::from("/tmp/jki_test");
-        assert_eq!(p.to_jki_metadata(), p.join("vault.metadata.json"));
+        assert_eq!(p.to_jki_metadata(), p.join("vault.metadata.yaml"));
         assert_eq!(p.to_jki_secrets(), p.join("vault.secrets.bin.age"));
         assert_eq!(p.to_jki_master_key(), p.join("master.key"));
     }
@@ -120,11 +120,11 @@ mod tests {
     #[test]
     #[serial]
     fn test_path_overrides() {
-        env::set_var("JKI_METADATA_PATH", "/tmp/m.json");
+        env::set_var("JKI_METADATA_PATH", "/tmp/m.yaml");
         env::set_var("JKI_SECRETS_PATH", "/tmp/s.bin");
         env::set_var("JKI_MASTER_KEY_PATH", "/tmp/k.key");
 
-        assert_eq!(JkiPath::metadata_path(), PathBuf::from("/tmp/m.json"));
+        assert_eq!(JkiPath::metadata_path(), PathBuf::from("/tmp/m.yaml"));
         assert_eq!(JkiPath::secrets_path(), PathBuf::from("/tmp/s.bin"));
         assert_eq!(JkiPath::master_key_path(), PathBuf::from("/tmp/k.key"));
 
