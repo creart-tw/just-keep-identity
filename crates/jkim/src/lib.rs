@@ -65,12 +65,6 @@ pub struct Cli {
 pub enum Commands {
     /// Check the health and status of the JKI system
     Status,
-    /// Initialize the JKI home directory and Git repository
-    Init {
-        /// Force reset by deleting existing vault data
-        #[arg(short, long)]
-        force: bool,
-    },
     /// Add a new account manually
     Add {
         /// Account name (e.g., email or username)
@@ -93,9 +87,9 @@ pub enum Commands {
         #[arg(long)]
         stdout: bool,
     },
-    /// Sync changes to Git (add, commit, pull --rebase, push)
-    #[command(alias = "sync")]
-    Git,
+    /// Git repository operations (init, sync)
+    #[command(subcommand)]
+    Git(GitCommands),
     /// Manage the jki-agent background process
     #[command(subcommand)]
     Agent(AgentCommands),
@@ -151,6 +145,8 @@ pub enum Commands {
     },
     /// Display the JKI user manual
     Man,
+    /// Sync changes to Git (shortcut for git sync)
+    Sync,
     /// Deduplicate accounts by comparing decrypted secrets
     Dedupe {
         /// Keep specific accounts by index (comma-separated, e.g., 1,3,5)
@@ -163,6 +159,18 @@ pub enum Commands {
         #[arg(short, long)]
         yes: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum GitCommands {
+    /// Initialize the JKI home directory and Git repository
+    Init {
+        /// Force reset by deleting existing vault data
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Sync changes (add, commit, pull --rebase, push)
+    Sync,
 }
 
 #[derive(Subcommand)]
@@ -595,12 +603,10 @@ fn handle_master_key(cmd: &MasterKeyCommands, auth: AuthSource, default_flag: bo
             println!("Master Key changed successfully.");
             let _ = jki_core::agent::AgentClient::unlock(&p1);
             if *commit {
-                let config_dir = JkiPath::home_dir();
-                let _ = git::add_all(&config_dir);
-                let _ = git::commit(&config_dir, "jki: master key rotation");
+                handle_git(default_flag, interactor)?;
                 println!("Changes committed to Git.");
             } else {
-                println!("Note: You may want to run 'jkim git' to backup your new encrypted vault.");
+                println!("Note: You may want to run 'jkim git sync' to backup your new encrypted vault.");
             }
         }
     }
@@ -1550,10 +1556,13 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
     match &cli.command {
         Commands::Status => handle_status()?,
         Commands::Agent(a) => handle_agent(a)?,
-        Commands::Init { force } => handle_init(*force)?,
-        Commands::Add { name, issuer, secret, uri, force, show_secret, stdout } => 
+        Commands::Git(g) => match g {
+            GitCommands::Init { force } => handle_init(*force)?,
+            GitCommands::Sync => handle_git(cli.default, &interactor)?,
+        },
+        Commands::Sync => handle_git(cli.default, &interactor)?,
+        Commands::Add { name, issuer, secret, uri, force, show_secret, stdout } =>
             handle_add(name, issuer, secret, uri, *force, *show_secret, *stdout, auth, cli.default, cli.quiet, &interactor)?,
-        Commands::Git => handle_git(cli.default, &interactor)?,
         Commands::Edit => handle_edit()?,
         Commands::Decrypt { force, keep, remove_key } => handle_decrypt(*force, *keep, *remove_key, cli.default, auth, &interactor)?,
         Commands::Encrypt { force } => handle_encrypt(*force, cli.default, auth, &interactor)?,
