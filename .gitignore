@@ -32,8 +32,11 @@ __pycache__/
 .env
 .env.*
 
-# Private data
-data/
+# JKI
+master.key
 vault.json
-config.json
-private/
+*.txt
+*.bin
+
+# Homebrew standalone test directory
+/brew-test/
