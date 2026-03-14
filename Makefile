@@ -116,8 +116,19 @@ sign: bundle
 notarize: sign
 	./scripts/notarize_macos.sh "$(APP_BUNDLE)" "$(APPLE_ID)" "$(TEAM_ID)" "$(AC_PASSWORD)"
 
+## sign-bins: Sign standalone binaries
+sign-bins: release
+	@echo "Signing standalone binaries..."
+	codesign --force --options runtime --entitlements crates/jki-agent/jki.entitlements --sign "$(SIGNING_IDENTITY)" $(TARGET_DIR)/jki
+	codesign --force --options runtime --entitlements crates/jki-agent/jki.entitlements --sign "$(SIGNING_IDENTITY)" $(TARGET_DIR)/jkim
+	codesign --force --options runtime --entitlements crates/jki-agent/jki.entitlements --sign "$(SIGNING_IDENTITY)" $(TARGET_DIR)/jki-agent
+
+## dist-macos: Complete macOS distribution pipeline (Build, Sign, Notarize, Package)
+dist-macos: release sign-bins notarize brew-package
+	@echo "macOS Distribution Package ready and notarized."
+
 ## brew-package: Package binaries for Homebrew (macOS ARM64)
-brew-package: release
+brew-package:
 	@echo "Packaging binaries for Homebrew..."
 	@mkdir -p target/brew
 	@cp $(TARGET_DIR)/jki target/brew/
