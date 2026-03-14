@@ -39,18 +39,19 @@ dev:
 test-all:
 	cargo test --workspace
 
-## cov: Run tests and generate coverage report (HTML)
+## cov: Run tests and generate coverage report (LLVM-based, accurate)
 cov:
-	CARGO_TARGET_DIR=target/tarpaulin cargo tarpaulin --workspace --all-features --engine llvm --all-targets --out Html --skip-clean
+	cargo llvm-cov --workspace --all-features
 
-## cov-audit: Show uncovered line numbers using jq (Run 'make cov' first)
-cov-audit:
-	@if [ ! -f tarpaulin-report.json ]; then \
-		echo "Error: tarpaulin-report.json not found. Generating it now..."; \
-		CARGO_TARGET_DIR=target/tarpaulin cargo tarpaulin --workspace --all-features --engine llvm --all-targets --out Json --skip-clean --output-dir .; \
-	fi
-	@echo "--- Uncovered Lines Audit ---"
-	@jq -r '.files[] | {path: (.path | join("/")), uncovered: [.traces[] | select(.stats.Line == 0) | .line] | sort} | select(.uncovered | length > 0) | "\(.path): \(.uncovered | join(", "))"' tarpaulin-report.json
+## cov-html: Generate HTML coverage report and open it
+cov-html:
+	cargo llvm-cov --workspace --all-features --html
+	@echo "Report generated at target/llvm-cov/html/index.html"
+	@if command -v open >/dev/null; then open target/llvm-cov/html/index.html; fi
+
+## cov-tarpaulin: Run tests and generate coverage report (Tarpaulin engine)
+cov-tarpaulin:
+	CARGO_TARGET_DIR=target/tarpaulin cargo tarpaulin --workspace --all-features --engine llvm --all-targets --out Html --skip-clean
 
 ## snapshot: Create .stable snapshots for all Rust source files
 snapshot:
