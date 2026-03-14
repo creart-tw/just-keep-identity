@@ -1,43 +1,76 @@
-use clap::{Parser, Subcommand, CommandFactory};
+use anyhow::{anyhow, Context};
+use clap::{CommandFactory, Parser, Subcommand};
+use console::style;
+use crossterm::{
+    cursor,
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    execute, terminal,
+};
 use jki_core::{
-    paths::JkiPath, 
-    git, 
-    Account, 
-    AccountSecret,
-    acquire_master_key, 
-    encrypt_with_master_key,
-    decrypt_with_master_key,
+    acquire_master_key, decrypt_with_master_key, encrypt_with_master_key, find_duplicate_groups,
+    git,
     import::parse_otpauth_uri,
-    Interactor,
-    TerminalInteractor,
-    find_duplicate_groups,
     keychain::{KeyringStore, SecretStore},
-    AuthSource,
-    JkiPathExt,
-    MetadataFile,
+    paths::JkiPath,
+    Account, AccountSecret, AuthSource, Interactor, JkiPathExt, MetadataFile, TerminalInteractor,
 };
 use secrecy::ExposeSecret;
 use std::collections::HashMap;
-use console::style;
+use std::env;
 use std::fs;
+use std::io::{stdout, Read, Write};
 use std::path::PathBuf;
 use std::process::Command;
-use std::env;
-use std::io::{Read, Write, stdout};
 use std::time::Duration;
-use crossterm::{
-    execute,
-    terminal,
-    cursor,
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
-};
 use zip::write::SimpleFileOptions;
-use zip::CompressionMethod;
 use zip::AesMode;
-use anyhow::{Context, anyhow};
+use zip::CompressionMethod;
 
 pub mod assets;
 use assets::AssetId;
+
+/// Preprocess command line arguments to support fuzzy subcommand matching.
+pub fn preprocess_args(mut args: Vec<String>) -> Vec<String> {
+    if args.len() > 1 && !args[1].starts_with('-') {
+        let input = &args[1];
+        let cmd = Cli::command();
+        let valid_subcommands: Vec<String> = cmd
+            .get_subcommands()
+            .map(|c| c.get_name().to_string())
+            .filter(|name| name != "help")
+            .collect();
+
+        // Only perform fuzzy search if input doesn't exactly match an existing command
+        if !valid_subcommands.contains(&input.to_string()) {
+            if let Some(resolved) = jki_core::resolve_subcommand(input, &valid_subcommands) {
+                eprintln!(
+                    "{} Running '{}' ({} matched)",
+                    style("[Fuzzy]").yellow().bold(),
+                    style(&resolved).cyan().bold(),
+                    style(input).dim()
+                );
+                args[1] = resolved;
+            } else {
+                // Check if it's worth giving suggestions
+                let suggestions = jki_core::get_subcommand_suggestions(input, &valid_subcommands);
+                if !suggestions.is_empty() {
+                    eprintln!(
+                        "{} '{}' is not a valid command.",
+                        style("Error:").red().bold(),
+                        input
+                    );
+                    eprintln!("\n{} Did you mean?", style("?").yellow().bold());
+                    for s in suggestions {
+                        eprintln!("  - {}", style(s).cyan());
+                    }
+                    eprintln!("");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+    args
+}
 
 #[derive(Parser)]
 #[command(name = "jkim", version, about = "JK Suite Management Hub")]
@@ -236,7 +269,11 @@ pub enum ConfigCommands {
     Check,
 }
 
-fn handle_config(cmd: &ConfigCommands, auth: AuthSource, interactor: &dyn Interactor) -> anyhow::Result<()> {
+fn handle_config(
+    cmd: &ConfigCommands,
+    auth: AuthSource,
+    interactor: &dyn Interactor,
+) -> anyhow::Result<()> {
     match cmd {
         ConfigCommands::Check => {
             println!("--- JKI Vault Integrity Check ---\n");
@@ -253,7 +290,7 @@ fn handle_config(cmd: &ConfigCommands, auth: AuthSource, interactor: &dyn Intera
                 Ok(m) => {
                     println!("OK ({} accounts)", m.accounts.len());
                     m
-                },
+                }
                 Err(e) => {
                     println!("ERROR");
                     eprintln!("  -> {}", e);
@@ -295,15 +332,23 @@ fn handle_config(cmd: &ConfigCommands, auth: AuthSource, interactor: &dyn Intera
             let master_key = acquire_master_key(auth, interactor, None).ok();
 
             let secrets_map: Option<HashMap<String, AccountSecret>> = if dec_path.exists() {
-                fs::read(&dec_path).ok().and_then(|c| serde_json::from_slice(&c).ok())
+                fs::read(&dec_path)
+                    .ok()
+                    .and_then(|c| serde_json::from_slice(&c).ok())
             } else if sec_path.exists() {
                 if let Some(k) = master_key {
                     if let Ok(encrypted) = fs::read(&sec_path) {
                         if let Ok(decrypted) = decrypt_with_master_key(&encrypted, &k) {
                             serde_json::from_slice(&decrypted).ok()
-                        } else { None }
-                    } else { None }
-                } else { None }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
             } else {
                 None
             };
@@ -312,7 +357,12 @@ fn handle_config(cmd: &ConfigCommands, auth: AuthSource, interactor: &dyn Intera
                 let mut missing_secrets = vec![];
                 for acc in &metadata.accounts {
                     if !secrets.contains_key(&acc.id) {
-                        missing_secrets.push(format!("{}:{} (ID: {})", acc.issuer.as_deref().unwrap_or("None"), acc.name, acc.id));
+                        missing_secrets.push(format!(
+                            "{}:{} (ID: {})",
+                            acc.issuer.as_deref().unwrap_or("None"),
+                            acc.name,
+                            acc.id
+                        ));
                     }
                 }
 
@@ -340,7 +390,11 @@ fn handle_config(cmd: &ConfigCommands, auth: AuthSource, interactor: &dyn Intera
     Ok(())
 }
 
-fn handle_export(output: &Option<PathBuf>, auth: AuthSource, interactor: &dyn Interactor) -> anyhow::Result<()> {
+fn handle_export(
+    output: &Option<PathBuf>,
+    auth: AuthSource,
+    interactor: &dyn Interactor,
+) -> anyhow::Result<()> {
     let meta_path = JkiPath::metadata_path();
     let sec_path = JkiPath::secrets_path();
     let dec_path = JkiPath::decrypted_secrets_path();
@@ -349,10 +403,12 @@ fn handle_export(output: &Option<PathBuf>, auth: AuthSource, interactor: &dyn In
         return Err(anyhow!("Metadata not found. Run 'jkim init' first."));
     }
 
-    let master_key = acquire_master_key(auth, interactor, None).map_err(|e| anyhow!("Authentication failed: {}", e))?;
+    let master_key = acquire_master_key(auth, interactor, None)
+        .map_err(|e| anyhow!("Authentication failed: {}", e))?;
 
     let meta_content = fs::read_to_string(&meta_path).context("Failed to read metadata")?;
-    let metadata: MetadataFile = serde_yaml::from_str(&meta_content).context("Failed to parse metadata")?;
+    let metadata: MetadataFile =
+        serde_yaml::from_str(&meta_content).context("Failed to parse metadata")?;
 
     let secrets_map: HashMap<String, AccountSecret> = if dec_path.exists() {
         let content = fs::read(&dec_path).context("Failed to read plaintext secrets")?;
@@ -370,8 +426,12 @@ fn handle_export(output: &Option<PathBuf>, auth: AuthSource, interactor: &dyn In
         eprintln!("Warning: Some accounts are missing secrets: {:?}", missing);
     }
 
-    let export_pass = interactor.prompt_password("Enter EXPORT Password (for ZIP encryption)").map_err(|e| anyhow!(e))?;
-    let export_pass_confirm = interactor.prompt_password("Confirm EXPORT Password").map_err(|e| anyhow!(e))?;
+    let export_pass = interactor
+        .prompt_password("Enter EXPORT Password (for ZIP encryption)")
+        .map_err(|e| anyhow!(e))?;
+    let export_pass_confirm = interactor
+        .prompt_password("Confirm EXPORT Password")
+        .map_err(|e| anyhow!(e))?;
     if export_pass.expose_secret() != export_pass_confirm.expose_secret() {
         return Err(anyhow!("Passwords do not match."));
     }
@@ -388,12 +448,15 @@ fn handle_export(output: &Option<PathBuf>, auth: AuthSource, interactor: &dyn In
         .compression_method(CompressionMethod::Deflated)
         .with_aes_encryption(AesMode::Aes256, export_pass.expose_secret());
 
-    zip.start_file("accounts.txt", options).context("Failed to start file in ZIP")?;
-    
+    zip.start_file("accounts.txt", options)
+        .context("Failed to start file in ZIP")?;
+
     for acc in integrated {
         let uri = acc.to_otpauth_uri();
-        zip.write_all(uri.as_bytes()).context("Failed to write to ZIP")?;
-        zip.write_all(b"\n").context("Failed to write newline to ZIP")?;
+        zip.write_all(uri.as_bytes())
+            .context("Failed to write to ZIP")?;
+        zip.write_all(b"\n")
+            .context("Failed to write newline to ZIP")?;
     }
 
     zip.finish().context("Failed to finalize ZIP")?;
@@ -417,7 +480,8 @@ fn handle_agent(cmd: &AgentCommands) -> anyhow::Result<()> {
         }
         AgentCommands::Stop => {
             if AgentClient::ping() {
-                AgentClient::shutdown().map_err(|e| anyhow!("Failed to shut down jki-agent: {}", e))?;
+                AgentClient::shutdown()
+                    .map_err(|e| anyhow!("Failed to shut down jki-agent: {}", e))?;
                 println!("jki-agent shut down successfully.");
             } else {
                 println!("jki-agent is not running.");
@@ -451,7 +515,7 @@ fn handle_status() -> anyhow::Result<()> {
         Ok(_) => println!("  - System Keychain : Found (jki:master_key)"),
         Err(_) => println!("  - System Keychain : Not found"),
     }
-    
+
     let agent_status = if jki_core::agent::AgentClient::ping() {
         if jki_core::agent::AgentClient::get_master_key().is_ok() {
             "Running (Unlocked)"
@@ -468,8 +532,22 @@ fn handle_status() -> anyhow::Result<()> {
     if let Some(repo_status) = git::check_status(&config_dir) {
         println!("  - Git Repository  : OK ({:?})", config_dir);
         println!("  - Current Branch  : {}", repo_status.branch);
-        println!("  - Working Tree    : {}", if repo_status.is_clean { "Clean" } else { "Modified" });
-        println!("  - Remote          : {}", if repo_status.has_remote { "Configured" } else { "None" });
+        println!(
+            "  - Working Tree    : {}",
+            if repo_status.is_clean {
+                "Clean"
+            } else {
+                "Modified"
+            }
+        );
+        println!(
+            "  - Remote          : {}",
+            if repo_status.has_remote {
+                "Configured"
+            } else {
+                "None"
+            }
+        );
     } else {
         println!("  - Git Repository  : Not initialized");
     }
@@ -482,23 +560,45 @@ fn handle_status() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn handle_master_key(cmd: &MasterKeyCommands, auth: AuthSource, default_flag: bool, interactor: &dyn Interactor) -> anyhow::Result<()> {
+fn handle_master_key(
+    cmd: &MasterKeyCommands,
+    auth: AuthSource,
+    default_flag: bool,
+    interactor: &dyn Interactor,
+) -> anyhow::Result<()> {
     let key_path = JkiPath::master_key_path();
     let sec_path = JkiPath::secrets_path();
 
     match cmd {
-        MasterKeyCommands::Set { force, keychain, no_keychain: _ } => {
+        MasterKeyCommands::Set {
+            force,
+            keychain,
+            no_keychain: _,
+        } => {
             if !*force && key_path.exists() {
-                if !default_flag && !interactor.confirm(&format!("Warning: master.key already exists at {:?}", key_path), false) { return Ok(()); }
+                if !default_flag
+                    && !interactor.confirm(
+                        &format!("Warning: master.key already exists at {:?}", key_path),
+                        false,
+                    )
+                {
+                    return Ok(());
+                }
             }
             if !*force && sec_path.exists() {
                 println!("CRITICAL WARNING: vault.secrets.bin.age already exists.");
                 println!("If the new key doesn't match the one used to encrypt it, you will LOSE ACCESS to your secrets.");
-                if !default_flag && !interactor.confirm("Proceed anyway?", false) { return Ok(()); }
+                if !default_flag && !interactor.confirm("Proceed anyway?", false) {
+                    return Ok(());
+                }
             }
 
-            let p1 = interactor.prompt_password("Enter new Master Key").map_err(|e| anyhow!(e))?;
-            let p2 = interactor.prompt_password("Confirm Master Key").map_err(|e| anyhow!(e))?;
+            let p1 = interactor
+                .prompt_password("Enter new Master Key")
+                .map_err(|e| anyhow!(e))?;
+            let p2 = interactor
+                .prompt_password("Confirm Master Key")
+                .map_err(|e| anyhow!(e))?;
             if p1.expose_secret() != p2.expose_secret() {
                 return Err(anyhow!("Passwords do not match."));
             }
@@ -507,7 +607,8 @@ fn handle_master_key(cmd: &MasterKeyCommands, auth: AuthSource, default_flag: bo
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).context("Failed to set key permissions")?;
+                fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))
+                    .context("Failed to set key permissions")?;
             }
             println!("Master Key saved to {:?}", key_path);
 
@@ -523,7 +624,14 @@ fn handle_master_key(cmd: &MasterKeyCommands, auth: AuthSource, default_flag: bo
             let mut removed = false;
             if key_path.exists() {
                 if !*force {
-                    if !default_flag && !interactor.confirm("Warning: Removing master.key from disk. Are you sure?", false) { return Ok(()); }
+                    if !default_flag
+                        && !interactor.confirm(
+                            "Warning: Removing master.key from disk. Are you sure?",
+                            false,
+                        )
+                    {
+                        return Ok(());
+                    }
                 }
                 fs::remove_file(&key_path).context("Failed to remove key")?;
                 println!("Master Key removed from disk.");
@@ -532,7 +640,14 @@ fn handle_master_key(cmd: &MasterKeyCommands, auth: AuthSource, default_flag: bo
 
             if *keychain {
                 if !*force && !removed {
-                    if !default_flag && !interactor.confirm("Warning: Removing master_key from system keychain. Are you sure?", false) { return Ok(()); }
+                    if !default_flag
+                        && !interactor.confirm(
+                            "Warning: Removing master_key from system keychain. Are you sure?",
+                            false,
+                        )
+                    {
+                        return Ok(());
+                    }
                 }
                 if let Err(e) = KeyringStore.delete_secret("jki", "master_key") {
                     eprintln!("Warning: Failed to remove from system keychain: {}", e);
@@ -542,9 +657,12 @@ fn handle_master_key(cmd: &MasterKeyCommands, auth: AuthSource, default_flag: bo
             }
         }
         MasterKeyCommands::Change { commit } => {
-            let mut current_key = acquire_master_key(auth, interactor, None)
-                .unwrap_or_else(|_| interactor.prompt_password("Enter current Master Key").expect("Input failed"));
-            
+            let mut current_key = acquire_master_key(auth, interactor, None).unwrap_or_else(|_| {
+                interactor
+                    .prompt_password("Enter current Master Key")
+                    .expect("Input failed")
+            });
+
             let mut secrets_data = None;
             if sec_path.exists() {
                 let encrypted = fs::read(&sec_path).context("Failed to read secrets")?;
@@ -552,16 +670,25 @@ fn handle_master_key(cmd: &MasterKeyCommands, auth: AuthSource, default_flag: bo
                     Ok(d) => secrets_data = Some(d),
                     Err(_) => {
                         println!("Stored Master Key failed to decrypt vault.");
-                        current_key = interactor.prompt_password("Enter CORRECT current Master Key").map_err(|e| anyhow!(e))?;
-                        secrets_data = Some(decrypt_with_master_key(&encrypted, &current_key).map_err(|e| anyhow!("Authentication failed: {}", e))?);
+                        current_key = interactor
+                            .prompt_password("Enter CORRECT current Master Key")
+                            .map_err(|e| anyhow!(e))?;
+                        secrets_data = Some(
+                            decrypt_with_master_key(&encrypted, &current_key)
+                                .map_err(|e| anyhow!("Authentication failed: {}", e))?,
+                        );
                     }
                 }
             } else {
                 println!("No existing vault found. This is equivalent to 'set'.");
             }
 
-            let p1 = interactor.prompt_password("Enter NEW Master Key").map_err(|e| anyhow!(e))?;
-            let p2 = interactor.prompt_password("Confirm NEW Master Key").map_err(|e| anyhow!(e))?;
+            let p1 = interactor
+                .prompt_password("Enter NEW Master Key")
+                .map_err(|e| anyhow!(e))?;
+            let p2 = interactor
+                .prompt_password("Confirm NEW Master Key")
+                .map_err(|e| anyhow!(e))?;
             if p1.expose_secret() != p2.expose_secret() {
                 return Err(anyhow!("Passwords do not match."));
             }
@@ -573,15 +700,19 @@ fn handle_master_key(cmd: &MasterKeyCommands, auth: AuthSource, default_flag: bo
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&key_tmp, fs::Permissions::from_mode(0o600)).context("Failed to set temp key permissions")?;
+                fs::set_permissions(&key_tmp, fs::Permissions::from_mode(0o600))
+                    .context("Failed to set temp key permissions")?;
             }
 
             if let Some(data) = secrets_data {
-                let encrypted = encrypt_with_master_key(&data, &p1).map_err(|e| anyhow!("Encryption failed: {}", e))?;
+                let encrypted = encrypt_with_master_key(&data, &p1)
+                    .map_err(|e| anyhow!("Encryption failed: {}", e))?;
                 fs::write(&sec_tmp, encrypted).context("Failed to write temp secrets")?;
             }
 
-            if sec_tmp.exists() { fs::rename(&sec_tmp, &sec_path).context("Failed to replace secrets")?; }
+            if sec_tmp.exists() {
+                fs::rename(&sec_tmp, &sec_path).context("Failed to replace secrets")?;
+            }
             fs::rename(&key_tmp, &key_path).context("Failed to replace key")?;
 
             if let Ok(_) = KeyringStore.get_secret("jki", "master_key") {
@@ -598,7 +729,9 @@ fn handle_master_key(cmd: &MasterKeyCommands, auth: AuthSource, default_flag: bo
                 handle_git(default_flag, interactor)?;
                 println!("Changes committed to Git.");
             } else {
-                println!("Note: You may want to run 'jkim git sync' to backup your new encrypted vault.");
+                println!(
+                    "Note: You may want to run 'jkim git sync' to backup your new encrypted vault."
+                );
             }
         }
     }
@@ -610,44 +743,63 @@ fn handle_keychain(cmd: &KeychainCommands, interactor: &dyn Interactor) -> anyho
 
     match cmd {
         KeychainCommands::Set => {
-            let p1 = interactor.prompt_password("Enter Master Key to store in keychain").map_err(|e| anyhow!(e))?;
-            let p2 = interactor.prompt_password("Confirm Master Key").map_err(|e| anyhow!(e))?;
-            
+            let p1 = interactor
+                .prompt_password("Enter Master Key to store in keychain")
+                .map_err(|e| anyhow!(e))?;
+            let p2 = interactor
+                .prompt_password("Confirm Master Key")
+                .map_err(|e| anyhow!(e))?;
+
             if p1.expose_secret() != p2.expose_secret() {
                 return Err(anyhow!("Passwords do not match."));
             }
 
-            KeyringStore.set_secret("jki", "master_key", p1.expose_secret()).map_err(|e| anyhow!("Failed to save to system keychain: {}", e))?;
+            KeyringStore
+                .set_secret("jki", "master_key", p1.expose_secret())
+                .map_err(|e| anyhow!("Failed to save to system keychain: {}", e))?;
             println!("Master Key saved to system keychain successfully.");
         }
         KeychainCommands::Remove => {
-            KeyringStore.delete_secret("jki", "master_key").map_err(|e| anyhow!("Failed to remove from system keychain: {}", e))?;
+            KeyringStore
+                .delete_secret("jki", "master_key")
+                .map_err(|e| anyhow!("Failed to remove from system keychain: {}", e))?;
             println!("Master Key removed from system keychain successfully.");
         }
         KeychainCommands::Push => {
             if !key_path.exists() {
-                return Err(anyhow!("Error: master.key file not found at {:?}.", key_path));
+                return Err(anyhow!(
+                    "Error: master.key file not found at {:?}.",
+                    key_path
+                ));
             }
             let content = fs::read_to_string(&key_path).context("Failed to read master.key")?;
-            KeyringStore.set_secret("jki", "master_key", content.trim()).map_err(|e| anyhow!("Failed to push to system keychain: {}", e))?;
-            println!("Master Key pushed from {:?} to system keychain successfully.", key_path);
+            KeyringStore
+                .set_secret("jki", "master_key", content.trim())
+                .map_err(|e| anyhow!("Failed to push to system keychain: {}", e))?;
+            println!(
+                "Master Key pushed from {:?} to system keychain successfully.",
+                key_path
+            );
         }
-        KeychainCommands::Pull => {
-            match KeyringStore.get_secret("jki", "master_key") {
-                Ok(secret) => {
-                    fs::write(&key_path, secret.expose_secret()).context("Failed to write master.key")?;
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).context("Failed to set key permissions")?;
-                    }
-                    println!("Master Key pulled from system keychain to {:?} successfully.", key_path);
+        KeychainCommands::Pull => match KeyringStore.get_secret("jki", "master_key") {
+            Ok(secret) => {
+                fs::write(&key_path, secret.expose_secret())
+                    .context("Failed to write master.key")?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))
+                        .context("Failed to set key permissions")?;
                 }
-                Err(e) => {
-                    return Err(anyhow!("Error: Failed to pull from system keychain: {}", e));
-                }
+                println!(
+                    "Master Key pulled from system keychain to {:?} successfully.",
+                    key_path
+                );
             }
-        }
+            Err(e) => {
+                return Err(anyhow!("Error: Failed to pull from system keychain: {}", e));
+            }
+        },
     }
     Ok(())
 }
@@ -660,7 +812,9 @@ fn handle_git(default_flag: bool, interactor: &dyn Interactor) -> anyhow::Result
     let status = match git::check_status(&config_dir) {
         Some(s) => s,
         None => {
-            return Err(anyhow!("Error: Not a git repository. Run 'jkim init' first."));
+            return Err(anyhow!(
+                "Error: Not a git repository. Run 'jkim init' first."
+            ));
         }
     };
 
@@ -669,19 +823,29 @@ fn handle_git(default_flag: bool, interactor: &dyn Interactor) -> anyhow::Result
     let encrypted_path = JkiPath::secrets_path();
 
     if plaintext_path.exists() {
-        println!("  - Detected plaintext secrets ({:?})...", plaintext_path.file_name().unwrap_or_default());
+        println!(
+            "  - Detected plaintext secrets ({:?})...",
+            plaintext_path.file_name().unwrap_or_default()
+        );
         let store = KeyringStore;
         match acquire_master_key(AuthSource::Auto, interactor, Some(&store)) {
             Ok(key) => {
                 println!("  - Master key acquired. Auto-encrypting...");
                 let data = fs::read(&plaintext_path).context("Failed to read plaintext secrets")?;
-                let encrypted = encrypt_with_master_key(&data, &key).context("Encryption failed")?;
-                fs::write(&encrypted_path, encrypted).context("Failed to write encrypted secrets")?;
+                let encrypted =
+                    encrypt_with_master_key(&data, &key).context("Encryption failed")?;
+                fs::write(&encrypted_path, encrypted)
+                    .context("Failed to write encrypted secrets")?;
                 fs::remove_file(&plaintext_path).context("Failed to remove plaintext secrets")?;
                 println!("  - Encrypted and secured vault secrets.");
             }
             Err(_) => {
-                eprintln!("{}", style("  ! Warning: Plaintext secrets found but could not be auto-encrypted.").yellow().bold());
+                eprintln!(
+                    "{}",
+                    style("  ! Warning: Plaintext secrets found but could not be auto-encrypted.")
+                        .yellow()
+                        .bold()
+                );
                 eprintln!("    Only encrypted vault secrets are allowed in synchronization.");
             }
         }
@@ -725,12 +889,15 @@ fn handle_git(default_flag: bool, interactor: &dyn Interactor) -> anyhow::Result
         println!("  - Pull --rebase...");
         if let Err(e) = git::pull_rebase(&config_dir) {
             eprintln!("  - Pull failed: {}.", e);
-            
+
             let should_resolve = if default_flag {
                 println!("  - Conflict detected. Using recommended path (--default).");
                 true
             } else {
-                interactor.confirm("Conflict detected. Automatically backup and resolve using local changes?", true)
+                interactor.confirm(
+                    "Conflict detected. Automatically backup and resolve using local changes?",
+                    true,
+                )
             };
 
             if should_resolve {
@@ -752,14 +919,18 @@ fn handle_git(default_flag: bool, interactor: &dyn Interactor) -> anyhow::Result
                         println!("  - Conflicts resolved and rebase completed.");
                     }
                     Ok(_) => {
-                        return Err(anyhow!("Pull failed but no conflicts detected. Resolve manually."));
+                        return Err(anyhow!(
+                            "Pull failed but no conflicts detected. Resolve manually."
+                        ));
                     }
                     Err(e) => {
                         return Err(anyhow!("Error: Failed to get conflicting files: {}", e));
                     }
                 }
             } else {
-                return Err(anyhow!("Manual resolution required. Run 'git status' to see conflicts."));
+                return Err(anyhow!(
+                    "Manual resolution required. Run 'git status' to see conflicts."
+                ));
             }
         }
 
@@ -790,15 +961,24 @@ fn handle_edit() -> anyhow::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         let mut perms = fs::metadata(temp_file.path()).unwrap().permissions();
         perms.set_mode(0o600);
-        fs::set_permissions(temp_file.path(), perms).context("Failed to set temp file permissions")?;
+        fs::set_permissions(temp_file.path(), perms)
+            .context("Failed to set temp file permissions")?;
     }
 
     let content = fs::read_to_string(&meta_path).context("Failed to read metadata")?;
-    temp_file.write_all(content.as_bytes()).context("Failed to write to temporary file")?;
-    temp_file.flush().context("Failed to flush temporary file")?;
+    temp_file
+        .write_all(content.as_bytes())
+        .context("Failed to write to temporary file")?;
+    temp_file
+        .flush()
+        .context("Failed to flush temporary file")?;
 
     let editor = env::var("EDITOR").unwrap_or_else(|_| {
-        if cfg!(windows) { "notepad.exe".to_string() } else { "vi".to_string() }
+        if cfg!(windows) {
+            "notepad.exe".to_string()
+        } else {
+            "vi".to_string()
+        }
     });
 
     println!("Opening metadata with {}...", editor);
@@ -809,8 +989,11 @@ fn handle_edit() -> anyhow::Result<()> {
 
     if status.success() {
         let mut new_content = String::new();
-        temp_file.reopen().context("Failed to reopen temp file")?
-            .read_to_string(&mut new_content).context("Failed to read back metadata from temp file")?;
+        temp_file
+            .reopen()
+            .context("Failed to reopen temp file")?
+            .read_to_string(&mut new_content)
+            .context("Failed to read back metadata from temp file")?;
 
         match serde_yaml::from_str::<MetadataFile>(&new_content) {
             Ok(_) => {
@@ -821,7 +1004,10 @@ fn handle_edit() -> anyhow::Result<()> {
             Err(e) => {
                 eprintln!("\nERROR: Metadata contains JSON syntax errors: {}", e);
                 eprintln!("The changes have NOT been applied.");
-                eprintln!("Your edited content is preserved at: {:?}", temp_file.path());
+                eprintln!(
+                    "Your edited content is preserved at: {:?}",
+                    temp_file.path()
+                );
                 let (file, path) = temp_file.keep().context("Failed to preserve temp file")?;
                 drop(file);
                 drop(path);
@@ -833,30 +1019,51 @@ fn handle_edit() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn handle_decrypt(force: bool, keep: bool, remove_key: bool, default_flag: bool, auth: AuthSource, interactor: &dyn Interactor) -> anyhow::Result<()> {
+fn handle_decrypt(
+    force: bool,
+    keep: bool,
+    remove_key: bool,
+    default_flag: bool,
+    auth: AuthSource,
+    interactor: &dyn Interactor,
+) -> anyhow::Result<()> {
     let sec_path = JkiPath::secrets_path();
     let dec_path = JkiPath::decrypted_secrets_path();
     let key_path = JkiPath::master_key_path();
 
     if !sec_path.exists() {
-        return Err(anyhow!("Error: Encrypted vault not found at {:?}", sec_path));
+        return Err(anyhow!(
+            "Error: Encrypted vault not found at {:?}",
+            sec_path
+        ));
     }
 
     if dec_path.exists() && !force {
-        if !default_flag && !interactor.confirm(&format!("Warning: Plaintext vault already exists at {:?}. Overwrite?", dec_path), false) {
+        if !default_flag
+            && !interactor.confirm(
+                &format!(
+                    "Warning: Plaintext vault already exists at {:?}. Overwrite?",
+                    dec_path
+                ),
+                false,
+            )
+        {
             return Ok(());
         }
     }
 
-    let master_key = acquire_master_key(auth, interactor, None).map_err(|e| anyhow!("Authentication failed: {}", e))?;
+    let master_key = acquire_master_key(auth, interactor, None)
+        .map_err(|e| anyhow!("Authentication failed: {}", e))?;
     let encrypted = fs::read(&sec_path).context("Failed to read secrets")?;
-    let decrypted = decrypt_with_master_key(&encrypted, &master_key).map_err(|e| anyhow!("Decryption failed: {}", e))?;
+    let decrypted = decrypt_with_master_key(&encrypted, &master_key)
+        .map_err(|e| anyhow!("Decryption failed: {}", e))?;
 
     fs::write(&dec_path, &decrypted).context("Failed to write plaintext vault")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&dec_path, fs::Permissions::from_mode(0o600)).context("Failed to set vault permissions")?;
+        fs::set_permissions(&dec_path, fs::Permissions::from_mode(0o600))
+            .context("Failed to set vault permissions")?;
     }
     println!("Vault decrypted to plaintext at {:?}", dec_path);
     println!("Note: jki will now use this for zero-latency lookups.");
@@ -882,23 +1089,41 @@ fn handle_decrypt(force: bool, keep: bool, remove_key: bool, default_flag: bool,
     Ok(())
 }
 
-fn handle_encrypt(force: bool, default_flag: bool, auth: AuthSource, interactor: &dyn Interactor) -> anyhow::Result<()> {
+fn handle_encrypt(
+    force: bool,
+    default_flag: bool,
+    auth: AuthSource,
+    interactor: &dyn Interactor,
+) -> anyhow::Result<()> {
     let sec_path = JkiPath::secrets_path();
     let dec_path = JkiPath::decrypted_secrets_path();
 
     if !dec_path.exists() {
-        return Err(anyhow!("Error: Plaintext vault not found at {:?}", dec_path));
+        return Err(anyhow!(
+            "Error: Plaintext vault not found at {:?}",
+            dec_path
+        ));
     }
 
     if sec_path.exists() && !force {
-        if !default_flag && !interactor.confirm(&format!("Warning: Encrypted vault already exists at {:?}. Overwrite?", sec_path), false) {
+        if !default_flag
+            && !interactor.confirm(
+                &format!(
+                    "Warning: Encrypted vault already exists at {:?}. Overwrite?",
+                    sec_path
+                ),
+                false,
+            )
+        {
             return Ok(());
         }
     }
 
-    let master_key = acquire_master_key(auth, interactor, None).map_err(|e| anyhow!("Authentication failed: {}", e))?;
+    let master_key = acquire_master_key(auth, interactor, None)
+        .map_err(|e| anyhow!("Authentication failed: {}", e))?;
     let decrypted = fs::read(&dec_path).context("Failed to read plaintext secrets")?;
-    let encrypted = encrypt_with_master_key(&decrypted, &master_key).map_err(|e| anyhow!("Encryption failed: {}", e))?;
+    let encrypted = encrypt_with_master_key(&decrypted, &master_key)
+        .map_err(|e| anyhow!("Encryption failed: {}", e))?;
 
     fs::write(&sec_path, encrypted).context("Failed to write encrypted vault")?;
     fs::remove_file(&dec_path).context("Failed to delete plaintext vault after encryption")?;
@@ -915,8 +1140,14 @@ fn handle_init(force: bool) -> anyhow::Result<()> {
         println!("\n[Force Reset]");
         let meta = JkiPath::metadata_path();
         let sec = JkiPath::secrets_path();
-        if meta.exists() { let _ = fs::remove_file(&meta); println!("  - Metadata: Deleted."); }
-        if sec.exists() { let _ = fs::remove_file(&sec); println!("  - Secrets:  Deleted."); }
+        if meta.exists() {
+            let _ = fs::remove_file(&meta);
+            println!("  - Metadata: Deleted.");
+        }
+        if sec.exists() {
+            let _ = fs::remove_file(&sec);
+            println!("  - Secrets:  Deleted.");
+        }
     }
 
     print!("  - Directory: ");
@@ -924,7 +1155,11 @@ fn handle_init(force: bool) -> anyhow::Result<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
-            fs::DirBuilder::new().mode(0o700).recursive(true).create(&config_dir).context("Failed to create config directory")?;
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .recursive(true)
+                .create(&config_dir)
+                .context("Failed to create config directory")?;
         }
         #[cfg(windows)]
         {
@@ -937,24 +1172,40 @@ fn handle_init(force: bool) -> anyhow::Result<()> {
 
     print!("  - Git Repo:  ");
     if !config_dir.join(".git").exists() {
-        let status = Command::new("git").args(["init", "-b", "main"]).current_dir(&config_dir).status().context("Failed to init git")?;
-        if status.success() { println!("Initialized."); } else { println!("FAILED to initialize."); }
+        let status = Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&config_dir)
+            .status()
+            .context("Failed to init git")?;
+        if status.success() {
+            println!("Initialized.");
+        } else {
+            println!("FAILED to initialize.");
+        }
     } else {
         println!("Already initialized. (Skipped)");
     }
 
     print!("  - Config:    ");
     let gitignore_path = config_dir.join(".gitignore");
-    let _ = fs::write(gitignore_path, "# JKI\nmaster.key\nvault.json\n*.txt\n*.bin\n");
+    let _ = fs::write(
+        gitignore_path,
+        "# JKI\nmaster.key\nvault.json\n*.txt\n*.bin\n",
+    );
     let gitattrs_path = config_dir.join(".gitattributes");
-    let _ = fs::write(gitattrs_path, "vault.secrets.bin.age binary\nvault.metadata.yaml filter=age\n");
+    let _ = fs::write(
+        gitattrs_path,
+        "vault.secrets.bin.age binary\nvault.metadata.yaml filter=age\n",
+    );
     println!(".gitignore and .gitattributes written. (Updated)");
 
     let meta_exists = JkiPath::metadata_path().exists();
     let sec_exists = JkiPath::secrets_path().exists();
     if meta_exists || sec_exists {
         println!("\n[Data Warning]");
-        if sec_exists { println!("  - Existing vault data (vault.secrets.bin.age) detected."); }
+        if sec_exists {
+            println!("  - Existing vault data (vault.secrets.bin.age) detected.");
+        }
         println!("  - Subsequent imports will attempt to MERGE using your Master Key.");
         println!("  - To start fresh, use 'jkim init --force' or delete vault.* manually.");
     }
@@ -963,8 +1214,17 @@ fn handle_init(force: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn handle_import_winauth(file: &PathBuf, overwrite: bool, auth: AuthSource, default_flag: bool, interactor: &dyn Interactor, force_new_vault: bool) -> anyhow::Result<()> {
-    if !file.exists() { return Err(anyhow!("Error: File not found.")); }
+fn handle_import_winauth(
+    file: &PathBuf,
+    overwrite: bool,
+    auth: AuthSource,
+    default_flag: bool,
+    interactor: &dyn Interactor,
+    force_new_vault: bool,
+) -> anyhow::Result<()> {
+    if !file.exists() {
+        return Err(anyhow!("Error: File not found."));
+    }
 
     let meta_path = JkiPath::metadata_path();
     let sec_path = JkiPath::secrets_path();
@@ -975,42 +1235,57 @@ fn handle_import_winauth(file: &PathBuf, overwrite: bool, auth: AuthSource, defa
     let has_json = dec_path.exists();
 
     if has_meta && !has_age && !has_json {
-        return Err(anyhow!("Error: Vault corrupted: Metadata exists but secrets are missing."));
+        return Err(anyhow!(
+            "Error: Vault corrupted: Metadata exists but secrets are missing."
+        ));
     }
 
     let master_key = acquire_master_key(auth, interactor, None).ok();
 
     let mut metadata = if has_meta {
         let content = fs::read_to_string(&meta_path).unwrap_or_default();
-        serde_yaml::from_str::<MetadataFile>(&content).unwrap_or(MetadataFile { accounts: vec![], version: 1 })
+        serde_yaml::from_str::<MetadataFile>(&content).unwrap_or(MetadataFile {
+            accounts: vec![],
+            version: 1,
+        })
     } else {
-        MetadataFile { accounts: vec![], version: 1 }
+        MetadataFile {
+            accounts: vec![],
+            version: 1,
+        }
     };
 
     let mut secrets_map: HashMap<String, AccountSecret> = match (has_age, has_json) {
         (true, _) => {
-            let k = master_key.clone().ok_or_else(|| anyhow!("Authentication required for encrypted vault."))?;
+            let k = master_key
+                .clone()
+                .ok_or_else(|| anyhow!("Authentication required for encrypted vault."))?;
             let encrypted = fs::read(&sec_path).context("Failed to read secrets file")?;
             match decrypt_with_master_key(&encrypted, &k) {
-                Ok(decrypted) => serde_json::from_slice(&decrypted).context("Failed to parse existing secrets JSON")?,
+                Ok(decrypted) => serde_json::from_slice(&decrypted)
+                    .context("Failed to parse existing secrets JSON")?,
                 Err(e) => {
                     if force_new_vault {
                         println!("\n[Warning] Decryption failed: {}. --force-new-vault is set, discarding existing data.", e);
-                        metadata = MetadataFile { accounts: vec![], version: 1 };
+                        metadata = MetadataFile {
+                            accounts: vec![],
+                            version: 1,
+                        };
                         HashMap::new()
                     } else {
-                        return Err(anyhow!("\n[Error] Master Key incorrect for the existing vault ({}).", e));
+                        return Err(anyhow!(
+                            "\n[Error] Master Key incorrect for the existing vault ({}).",
+                            e
+                        ));
                     }
                 }
             }
-        },
+        }
         (false, true) => {
             let content = fs::read(&dec_path).context("Failed to read plaintext secrets")?;
             serde_json::from_slice(&content).context("Failed to parse plaintext secrets")?
-        },
-        (false, false) => {
-            HashMap::new()
         }
+        (false, false) => HashMap::new(),
     };
 
     let content = fs::read_to_string(file).context("Failed to read file")?;
@@ -1020,7 +1295,10 @@ fn handle_import_winauth(file: &PathBuf, overwrite: bool, auth: AuthSource, defa
 
     let mut secret_to_ids: HashMap<String, Vec<String>> = HashMap::new();
     for (id, sec) in &secrets_map {
-        secret_to_ids.entry(sec.secret.clone()).or_default().push(id.clone());
+        secret_to_ids
+            .entry(sec.secret.clone())
+            .or_default()
+            .push(id.clone());
     }
 
     for line in content.lines() {
@@ -1028,18 +1306,21 @@ fn handle_import_winauth(file: &PathBuf, overwrite: bool, auth: AuthSource, defa
             let secret = acc.secret.clone();
 
             // 1. Exact triplet match (Issuer + Name + Secret)
-            let exact_match = metadata.accounts.iter().find(|m|
-                m.name == acc.name &&
-                m.issuer == acc.issuer &&
-                secrets_map.get(&m.id).map(|s| &s.secret) == Some(&secret)
-            );
+            let exact_match = metadata.accounts.iter().find(|m| {
+                m.name == acc.name
+                    && m.issuer == acc.issuer
+                    && secrets_map.get(&m.id).map(|s| &s.secret) == Some(&secret)
+            });
 
             if exact_match.is_some() {
                 skip_count += 1;
                 continue;
             }
 
-            let name_match_pos = metadata.accounts.iter().position(|m| m.name == acc.name && m.issuer == acc.issuer);
+            let name_match_pos = metadata
+                .accounts
+                .iter()
+                .position(|m| m.name == acc.name && m.issuer == acc.issuer);
 
             if let Some(pos) = name_match_pos {
                 if !overwrite {
@@ -1047,7 +1328,11 @@ fn handle_import_winauth(file: &PathBuf, overwrite: bool, auth: AuthSource, defa
                     continue;
                 }
                 let id = metadata.accounts[pos].id.clone();
-                let entry = AccountSecret { secret: secret.clone(), digits: acc.digits, algorithm: acc.algorithm.clone() };
+                let entry = AccountSecret {
+                    secret: secret.clone(),
+                    digits: acc.digits,
+                    algorithm: acc.algorithm.clone(),
+                };
                 secrets_map.insert(id, entry);
                 updated_count += 1;
                 continue;
@@ -1066,14 +1351,22 @@ fn handle_import_winauth(file: &PathBuf, overwrite: bool, auth: AuthSource, defa
                         m.name = acc.name.clone();
                         m.issuer = acc.issuer.clone();
                     }
-                    let entry = AccountSecret { secret: secret.clone(), digits: acc.digits, algorithm: acc.algorithm.clone() };
+                    let entry = AccountSecret {
+                        secret: secret.clone(),
+                        digits: acc.digits,
+                        algorithm: acc.algorithm.clone(),
+                    };
                     secrets_map.insert(existing_id.clone(), entry);
                     updated_count += 1;
                 } else {
                     // Non-unique secret
                     println!("[Ambiguous] Secret for '{}:{}' exists multiple times. Safely appending as new entry.", acc.issuer.as_deref().unwrap_or("None"), acc.name);
                     let id = acc.id.clone();
-                    let entry = AccountSecret { secret: secret.clone(), digits: acc.digits, algorithm: acc.algorithm.clone() };
+                    let entry = AccountSecret {
+                        secret: secret.clone(),
+                        digits: acc.digits,
+                        algorithm: acc.algorithm.clone(),
+                    };
                     acc.secret = "".to_string();
                     metadata.accounts.push(acc);
                     secrets_map.insert(id.clone(), entry);
@@ -1083,7 +1376,11 @@ fn handle_import_winauth(file: &PathBuf, overwrite: bool, auth: AuthSource, defa
             } else {
                 // 3. Completely new secret
                 let id = acc.id.clone();
-                let entry = AccountSecret { secret: secret.clone(), digits: acc.digits, algorithm: acc.algorithm.clone() };
+                let entry = AccountSecret {
+                    secret: secret.clone(),
+                    digits: acc.digits,
+                    algorithm: acc.algorithm.clone(),
+                };
                 acc.secret = "".to_string();
                 metadata.accounts.push(acc);
                 secrets_map.insert(id.clone(), entry);
@@ -1097,34 +1394,44 @@ fn handle_import_winauth(file: &PathBuf, overwrite: bool, auth: AuthSource, defa
     match (has_age, has_json) {
         (true, _) => {
             let k = master_key.ok_or_else(|| anyhow!("Already verified key above"))?;
-            let encrypted_data = encrypt_with_master_key(&secrets_json, &k).map_err(|e| anyhow!("Encryption failed: {}", e))?;
+            let encrypted_data = encrypt_with_master_key(&secrets_json, &k)
+                .map_err(|e| anyhow!("Encryption failed: {}", e))?;
             fs::write(&sec_path, encrypted_data).context("Failed to write encrypted vault")?;
             println!("Saved to encrypted vault.");
-        },
+        }
         (false, true) => {
             if let Some(k) = master_key {
-                if !default_flag && interactor.confirm("Master Key detected. Upgrade to Encrypted? [y/N]", false) {
-                    let encrypted_data = encrypt_with_master_key(&secrets_json, &k).map_err(|e| anyhow!("Encryption failed: {}", e))?;
-                    fs::write(&sec_path, encrypted_data).context("Failed to write encrypted vault")?;
+                if !default_flag
+                    && interactor.confirm("Master Key detected. Upgrade to Encrypted? [y/N]", false)
+                {
+                    let encrypted_data = encrypt_with_master_key(&secrets_json, &k)
+                        .map_err(|e| anyhow!("Encryption failed: {}", e))?;
+                    fs::write(&sec_path, encrypted_data)
+                        .context("Failed to write encrypted vault")?;
                     let _ = fs::remove_file(&dec_path);
                     println!("Vault upgraded to encrypted and plaintext deleted.");
                 } else {
-                    fs::write(&dec_path, &secrets_json).context("Failed to write plaintext vault")?;
+                    fs::write(&dec_path, &secrets_json)
+                        .context("Failed to write plaintext vault")?;
                     println!("Updated plaintext vault.");
                 }
             } else {
                 fs::write(&dec_path, &secrets_json).context("Failed to write plaintext vault")?;
                 println!("Updated plaintext vault.");
             }
-        },
+        }
         (false, false) => {
             if let Some(k) = master_key {
-                let encrypted_data = encrypt_with_master_key(&secrets_json, &k).map_err(|e| anyhow!("Encryption failed: {}", e))?;
+                let encrypted_data = encrypt_with_master_key(&secrets_json, &k)
+                    .map_err(|e| anyhow!("Encryption failed: {}", e))?;
                 fs::write(&sec_path, encrypted_data).context("Failed to write encrypted vault")?;
                 println!("Created encrypted vault.");
             } else {
-                if !default_flag && interactor.confirm("No Key. Create as PLAINTEXT vault? [y/n]", false) {
-                    fs::write(&dec_path, &secrets_json).context("Failed to write plaintext vault")?;
+                if !default_flag
+                    && interactor.confirm("No Key. Create as PLAINTEXT vault? [y/n]", false)
+                {
+                    fs::write(&dec_path, &secrets_json)
+                        .context("Failed to write plaintext vault")?;
                     println!("Created plaintext vault.");
                 } else {
                     println!("Import cancelled (No Key provided and declined plaintext).");
@@ -1134,9 +1441,13 @@ fn handle_import_winauth(file: &PathBuf, overwrite: bool, auth: AuthSource, defa
         }
     }
 
-    fs::write(&meta_path, serde_yaml::to_string(&metadata).unwrap()).context("Failed to write metadata")?;
+    fs::write(&meta_path, serde_yaml::to_string(&metadata).unwrap())
+        .context("Failed to write metadata")?;
     println!("\nImport completed successfully!");
-    println!("  - New: {}, Updated: {}, Skipped: {}", new_count, updated_count, skip_count);
+    println!(
+        "  - New: {}, Updated: {}, Skipped: {}",
+        new_count, updated_count, skip_count
+    );
     let _ = jki_core::agent::AgentClient::reload();
     Ok(())
 }
@@ -1158,17 +1469,28 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn perform_handshake(acc: &Account, is_authorized: bool, stdout_flag: bool) -> anyhow::Result<bool> {
+fn perform_handshake(
+    acc: &Account,
+    is_authorized: bool,
+    stdout_flag: bool,
+) -> anyhow::Result<bool> {
     let _guard = TerminalGuard::init()?;
     let mut stdout_handle = stdout();
 
     print!("\r\n[Handshake] Please verify this code on the service provider's website:\r\n");
-    print!("  Account : {}{}\r\n", acc.issuer.as_deref().map(|s| format!("[{}] ", s)).unwrap_or_default(), acc.name);
-    
-    let clipboard_status = if stdout_flag { 
-        "\x1b[33mDisabled (Stdout mode)\x1b[0m" 
-    } else { 
-        "\x1b[32mAuto-syncing (Enabled)\x1b[0m" 
+    print!(
+        "  Account : {}{}\r\n",
+        acc.issuer
+            .as_deref()
+            .map(|s| format!("[{}] ", s))
+            .unwrap_or_default(),
+        acc.name
+    );
+
+    let clipboard_status = if stdout_flag {
+        "\x1b[33mDisabled (Stdout mode)\x1b[0m"
+    } else {
+        "\x1b[32mAuto-syncing (Enabled)\x1b[0m"
     };
     print!("  Clipboard: {}\r\n", clipboard_status);
 
@@ -1185,12 +1507,15 @@ fn perform_handshake(acc: &Account, is_authorized: bool, stdout_flag: bool) -> a
             let now = chrono::Utc::now().timestamp() as u64;
             let seconds_left = 30 - (now % 30);
             let otp = jki_core::generate_otp(acc).unwrap_or_else(|_| "ERROR".to_string());
-            
+
             // Auto-copy to clipboard if changed and not in stdout mode
             if !stdout_flag && last_otp.as_ref() != Some(&otp) {
                 use copypasta::{ClipboardContext, ClipboardProvider};
                 if let Ok(mut ctx) = ClipboardContext::new() {
-                    let _ = <ClipboardContext as ClipboardProvider>::set_contents(&mut ctx, otp.clone());
+                    let _ = <ClipboardContext as ClipboardProvider>::set_contents(
+                        &mut ctx,
+                        otp.clone(),
+                    );
                 }
                 last_otp = Some(otp.clone());
             }
@@ -1203,7 +1528,10 @@ fn perform_handshake(acc: &Account, is_authorized: bool, stdout_flag: bool) -> a
             };
 
             let copy_indicator = if !stdout_flag { " (Copied!)" } else { "" };
-            print!("\r  CODE    : \x1b[1;32m{}\x1b[0m  (expires in {:2}s){}   ", display_otp, seconds_left, copy_indicator);
+            print!(
+                "\r  CODE    : \x1b[1;32m{}\x1b[0m  (expires in {:2}s){}   ",
+                display_otp, seconds_left, copy_indicator
+            );
             stdout_handle.flush()?;
 
             // Poll for input (100ms)
@@ -1245,10 +1573,12 @@ fn handle_dedupe(
         return Err(anyhow!("Metadata not found. Run 'jkim init' first."));
     }
 
-    let master_key = acquire_master_key(auth, interactor, None).map_err(|e| anyhow!("Authentication failed: {}", e))?;
+    let master_key = acquire_master_key(auth, interactor, None)
+        .map_err(|e| anyhow!("Authentication failed: {}", e))?;
 
     let meta_content = fs::read_to_string(&meta_path).context("Failed to read metadata")?;
-    let mut metadata: MetadataFile = serde_yaml::from_str(&meta_content).context("Failed to parse metadata")?;
+    let mut metadata: MetadataFile =
+        serde_yaml::from_str(&meta_content).context("Failed to parse metadata")?;
 
     let mut secrets_map: HashMap<String, AccountSecret> = if dec_path.exists() {
         let content = fs::read(&dec_path).context("Failed to read plaintext secrets")?;
@@ -1265,7 +1595,9 @@ fn handle_dedupe(
     let groups = find_duplicate_groups(&integrated);
 
     if groups.is_empty() {
-        if !quiet { println!("No duplicates found."); }
+        if !quiet {
+            println!("No duplicates found.");
+        }
         return Ok(());
     }
 
@@ -1275,7 +1607,10 @@ fn handle_dedupe(
     // Check for conflicts between keep and discard
     for idx in keep {
         if discard.contains(idx) {
-            return Err(anyhow!("Conflict: Index {} is in both --keep and --discard.", idx));
+            return Err(anyhow!(
+                "Conflict: Index {} is in both --keep and --discard.",
+                idx
+            ));
         }
     }
 
@@ -1283,9 +1618,13 @@ fn handle_dedupe(
         // List mode
         println!("The following duplicate groups were found:\n");
         for group in &groups {
-            println!("Group (Secret: {}...):", &group.secret[..std::cmp::min(8, group.secret.len())]);
+            println!(
+                "Group (Secret: {}...):",
+                &group.secret[..std::cmp::min(8, group.secret.len())]
+            );
             for acc in &group.accounts {
-                println!("  {:>2}) [{}] {} (ID: {})",
+                println!(
+                    "  {:>2}) [{}] {} (ID: {})",
                     acc.global_index,
                     acc.account.issuer.as_deref().unwrap_or("None"),
                     acc.account.name,
@@ -1342,7 +1681,8 @@ fn handle_dedupe(
     println!("The following entries will be removed from Metadata and Secrets vault:");
     for acc in &integrated {
         if to_delete_ids.contains(&acc.id) {
-            println!("  - [{}] {} (ID: {})",
+            println!(
+                "  - [{}] {} (ID: {})",
                 acc.issuer.as_deref().unwrap_or("None"),
                 acc.name,
                 acc.id
@@ -1365,13 +1705,15 @@ fn handle_dedupe(
     // Save back
     let secrets_json = serde_json::to_vec(&secrets_map).context("Failed to serialize secrets")?;
     if sec_path.exists() {
-        let encrypted = encrypt_with_master_key(&secrets_json, &master_key).map_err(|e| anyhow!("Encryption failed: {}", e))?;
+        let encrypted = encrypt_with_master_key(&secrets_json, &master_key)
+            .map_err(|e| anyhow!("Encryption failed: {}", e))?;
         fs::write(&sec_path, encrypted).context("Failed to write encrypted vault")?;
     } else if dec_path.exists() {
         fs::write(&dec_path, &secrets_json).context("Failed to write plaintext vault")?;
     }
 
-    fs::write(&meta_path, serde_yaml::to_string(&metadata).unwrap()).context("Failed to write metadata")?;
+    fs::write(&meta_path, serde_yaml::to_string(&metadata).unwrap())
+        .context("Failed to write metadata")?;
 
     println!("Success: {} entries removed.", to_delete_ids.len());
     let _ = jki_core::agent::AgentClient::reload();
@@ -1411,7 +1753,8 @@ fn handle_add(
         parse_otpauth_uri(u).ok_or_else(|| anyhow!("Invalid OTPAuth URI format."))?
     } else if let Some(n_val) = &name {
         if n_val.starts_with("otpauth://") {
-            parse_otpauth_uri(n_val).ok_or_else(|| anyhow!("Invalid OTPAuth URI format in positional argument."))?
+            parse_otpauth_uri(n_val)
+                .ok_or_else(|| anyhow!("Invalid OTPAuth URI format in positional argument."))?
         } else {
             // Standard manual input path
             let n = n_val.clone();
@@ -1419,20 +1762,30 @@ fn handle_add(
                 Some(i_val.clone())
             } else {
                 if atty::is(atty::Stream::Stdin) {
-                    let input = interactor.prompt("Enter Issuer (Optional, Enter to skip)").map_err(|e| anyhow!(e))?;
-                    if input.is_empty() { None } else { Some(input) }
+                    let input = interactor
+                        .prompt("Enter Issuer (Optional, Enter to skip)")
+                        .map_err(|e| anyhow!(e))?;
+                    if input.is_empty() {
+                        None
+                    } else {
+                        Some(input)
+                    }
                 } else {
                     None
                 }
             };
-            
+
             let s = if let Some(s_cli) = secret {
                 if !quiet && atty::is(atty::Stream::Stdin) {
                     eprintln!("Warning: Secret provided in CLI might leak into history.");
                 }
                 s_cli.clone()
             } else {
-                interactor.prompt_password("Enter Base32 Secret").map_err(|e| anyhow!(e))?.expose_secret().clone()
+                interactor
+                    .prompt_password("Enter Base32 Secret")
+                    .map_err(|e| anyhow!(e))?
+                    .expose_secret()
+                    .clone()
             };
 
             jki_core::Account {
@@ -1447,17 +1800,31 @@ fn handle_add(
         }
     } else {
         // No arguments provided, prompt for everything
-        if !atty::is(atty::Stream::Stdin) { return Err(anyhow!("Account name is required in non-TTY mode.")); }
-        let n = interactor.prompt("Enter Account Name").map_err(|e| anyhow!(e))?;
-        
+        if !atty::is(atty::Stream::Stdin) {
+            return Err(anyhow!("Account name is required in non-TTY mode."));
+        }
+        let n = interactor
+            .prompt("Enter Account Name")
+            .map_err(|e| anyhow!(e))?;
+
         let i = if atty::is(atty::Stream::Stdin) {
-            let input = interactor.prompt("Enter Issuer (Optional, Enter to skip)").map_err(|e| anyhow!(e))?;
-            if input.is_empty() { None } else { Some(input) }
+            let input = interactor
+                .prompt("Enter Issuer (Optional, Enter to skip)")
+                .map_err(|e| anyhow!(e))?;
+            if input.is_empty() {
+                None
+            } else {
+                Some(input)
+            }
         } else {
             None
         };
 
-        let s = interactor.prompt_password("Enter Base32 Secret").map_err(|e| anyhow!(e))?.expose_secret().clone();
+        let s = interactor
+            .prompt_password("Enter Base32 Secret")
+            .map_err(|e| anyhow!(e))?
+            .expose_secret()
+            .clone();
 
         jki_core::Account {
             id: uuid::Uuid::new_v4().to_string(),
@@ -1472,7 +1839,7 @@ fn handle_add(
 
     // 2. Secret Cleaning
     acc.secret = acc.secret.trim().replace(" ", "").to_uppercase();
-    
+
     // 3. Base32 Sanity Check
     if base32::decode(base32::Alphabet::RFC4648 { padding: true }, &acc.secret).is_none() {
         if !quiet && !force {
@@ -1496,34 +1863,55 @@ fn handle_add(
 
     let mut metadata = if meta_path.exists() {
         let content = fs::read_to_string(&meta_path).unwrap_or_default();
-        serde_yaml::from_str::<MetadataFile>(&content).unwrap_or(MetadataFile { accounts: vec![], version: 1 })
+        serde_yaml::from_str::<MetadataFile>(&content).unwrap_or(MetadataFile {
+            accounts: vec![],
+            version: 1,
+        })
     } else {
-        MetadataFile { accounts: vec![], version: 1 }
+        MetadataFile {
+            accounts: vec![],
+            version: 1,
+        }
     };
 
     let (has_age, has_json) = (sec_path.exists(), dec_path.exists());
     let mut secrets_map: HashMap<String, AccountSecret> = match (has_age, has_json) {
         (true, _) => {
-            let k = master_key.clone().ok_or_else(|| anyhow!("Authentication required for encrypted vault."))?;
+            let k = master_key
+                .clone()
+                .ok_or_else(|| anyhow!("Authentication required for encrypted vault."))?;
             let encrypted = fs::read(&sec_path).context("Failed to read secrets file")?;
-            let decrypted = decrypt_with_master_key(&encrypted, &k).map_err(|e| anyhow!("Decryption failed: {}", e))?;
+            let decrypted = decrypt_with_master_key(&encrypted, &k)
+                .map_err(|e| anyhow!("Decryption failed: {}", e))?;
             serde_json::from_slice(&decrypted).context("Failed to parse existing secrets JSON")?
-        },
+        }
         (false, true) => {
             let content = fs::read(&dec_path).context("Failed to read plaintext secrets")?;
             serde_json::from_slice(&content).context("Failed to parse plaintext secrets")?
-        },
+        }
         (false, false) => HashMap::new(),
     };
 
     // 5. Conflict Check
-    let existing_pos = metadata.accounts.iter().position(|m| m.name == acc.name && m.issuer == acc.issuer);
+    let existing_pos = metadata
+        .accounts
+        .iter()
+        .position(|m| m.name == acc.name && m.issuer == acc.issuer);
     if let Some(pos) = existing_pos {
         if !force {
-            return Err(anyhow!("Conflict: Account '{}:{}' already exists. Use -f/--force to overwrite.", 
-                acc.issuer.as_deref().unwrap_or(""), acc.name));
+            return Err(anyhow!(
+                "Conflict: Account '{}:{}' already exists. Use -f/--force to overwrite.",
+                acc.issuer.as_deref().unwrap_or(""),
+                acc.name
+            ));
         }
-        if !quiet { eprintln!("Overwriting existing account: {}:{}", acc.issuer.as_deref().unwrap_or(""), acc.name); }
+        if !quiet {
+            eprintln!(
+                "Overwriting existing account: {}:{}",
+                acc.issuer.as_deref().unwrap_or(""),
+                acc.name
+            );
+        }
         acc.id = metadata.accounts[pos].id.clone();
     }
 
@@ -1544,39 +1932,60 @@ fn handle_add(
         metadata.accounts.push(acc.clone());
     }
 
-    let entry = AccountSecret { secret: acc.secret.clone(), digits: acc.digits, algorithm: acc.algorithm.clone() };
+    let entry = AccountSecret {
+        secret: acc.secret.clone(),
+        digits: acc.digits,
+        algorithm: acc.algorithm.clone(),
+    };
     secrets_map.insert(acc.id.clone(), entry.clone());
 
     // 6. Write back
     let secrets_json = serde_json::to_vec(&secrets_map).context("Failed to serialize secrets")?;
     if has_age {
         let k = master_key.ok_or_else(|| anyhow!("Key required for encrypted write"))?;
-        let encrypted = encrypt_with_master_key(&secrets_json, &k).map_err(|e| anyhow!("Encryption failed: {}", e))?;
+        let encrypted = encrypt_with_master_key(&secrets_json, &k)
+            .map_err(|e| anyhow!("Encryption failed: {}", e))?;
         fs::write(&sec_path, encrypted).context("Failed to write encrypted vault")?;
-        
+
         // Anti-Shadowing: If a plaintext vault exists, it's now stale. Delete it.
         if has_json {
             let _ = fs::remove_file(&dec_path);
-            if !quiet { eprintln!("Note: Stale plaintext vault deleted to maintain integrity."); }
+            if !quiet {
+                eprintln!("Note: Stale plaintext vault deleted to maintain integrity.");
+            }
         }
     } else if has_json {
         fs::write(&dec_path, &secrets_json).context("Failed to write plaintext vault")?;
     } else {
         // New vault
         if let Some(k) = master_key {
-            let encrypted = encrypt_with_master_key(&secrets_json, &k).map_err(|e| anyhow!("Encryption failed: {}", e))?;
+            let encrypted = encrypt_with_master_key(&secrets_json, &k)
+                .map_err(|e| anyhow!("Encryption failed: {}", e))?;
             fs::write(&sec_path, encrypted).context("Failed to write encrypted vault")?;
         } else {
             fs::write(&dec_path, &secrets_json).context("Failed to write plaintext vault")?;
         }
     }
 
-    fs::write(&meta_path, serde_yaml::to_string(&metadata).unwrap()).context("Failed to write metadata")?;
+    fs::write(&meta_path, serde_yaml::to_string(&metadata).unwrap())
+        .context("Failed to write metadata")?;
 
-    if !quiet { println!("Account added successfully: {}:{}", acc.issuer.as_deref().unwrap_or(""), acc.name); }
-    
+    if !quiet {
+        println!(
+            "Account added successfully: {}:{}",
+            acc.issuer.as_deref().unwrap_or(""),
+            acc.name
+        );
+    }
+
     if show_secret {
-        if !quiet { eprintln!("[Secret] Added: {}:{}", acc.issuer.as_deref().unwrap_or(""), acc.name); }
+        if !quiet {
+            eprintln!(
+                "[Secret] Added: {}:{}",
+                acc.issuer.as_deref().unwrap_or(""),
+                acc.name
+            );
+        }
         println!("{}", entry.secret);
         println!("{}", acc.to_otpauth_uri());
     }
@@ -1588,7 +1997,9 @@ fn handle_add(
 pub fn run(cli: Cli) -> anyhow::Result<()> {
     let interactor = TerminalInteractor;
     let mut auth = cli.auth;
-    if cli.interactive { auth = AuthSource::Interactive; }
+    if cli.interactive {
+        auth = AuthSource::Interactive;
+    }
 
     match &cli.command {
         Commands::Status => handle_status()?,
@@ -1598,16 +2009,49 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             GitCommands::Sync => handle_git(cli.default, &interactor)?,
         },
         Commands::Sync => handle_git(cli.default, &interactor)?,
-        Commands::Add { name, issuer, secret, uri, force, show_secret, stdout } =>
-            handle_add(name, issuer, secret, uri, *force, *show_secret, *stdout, auth, cli.default, cli.quiet, &interactor)?,
+        Commands::Add {
+            name,
+            issuer,
+            secret,
+            uri,
+            force,
+            show_secret,
+            stdout,
+        } => handle_add(
+            name,
+            issuer,
+            secret,
+            uri,
+            *force,
+            *show_secret,
+            *stdout,
+            auth,
+            cli.default,
+            cli.quiet,
+            &interactor,
+        )?,
         Commands::Edit => handle_edit()?,
-        Commands::Decrypt { force, keep, remove_key } => handle_decrypt(*force, *keep, *remove_key, cli.default, auth, &interactor)?,
+        Commands::Decrypt {
+            force,
+            keep,
+            remove_key,
+        } => handle_decrypt(*force, *keep, *remove_key, cli.default, auth, &interactor)?,
         Commands::Encrypt { force } => handle_encrypt(*force, cli.default, auth, &interactor)?,
         Commands::MasterKey(m) => handle_master_key(m, auth, cli.default, &interactor)?,
         Commands::Keychain(k) => handle_keychain(k, &interactor)?,
         Commands::Config(c) => handle_config(c, auth, &interactor)?,
-        Commands::ImportWinauth { file, overwrite, force_new_vault } =>
-            handle_import_winauth(file, *overwrite, auth, cli.default, &interactor, *force_new_vault)?,
+        Commands::ImportWinauth {
+            file,
+            overwrite,
+            force_new_vault,
+        } => handle_import_winauth(
+            file,
+            *overwrite,
+            auth,
+            cli.default,
+            &interactor,
+            *force_new_vault,
+        )?,
         Commands::Export { output } => handle_export(output, auth, &interactor)?,
         Commands::Completions { shell, output } => {
             let mut cmd = Cli::command();
@@ -1624,31 +2068,45 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
                     if let Some(parent) = path.parent() {
                         let _ = fs::create_dir_all(parent);
                     }
-                    let mut file = fs::File::create(&path).context(format!("Failed to create completion file at {:?}", path))?;
+                    let mut file = fs::File::create(&path)
+                        .context(format!("Failed to create completion file at {:?}", path))?;
                     clap_complete::generate(*shell, &mut cmd, bin_name, &mut file);
-                    eprintln!("{} Completion script for {:?} written to {:?}", style("Success:").green().bold(), shell, path);
+                    eprintln!(
+                        "{} Completion script for {:?} written to {:?}",
+                        style("Success:").green().bold(),
+                        shell,
+                        path
+                    );
                 }
                 None => {
                     // Guide mode (default): No stdout pollution
                     AssetId::GuideCompletions.render();
                     let shell_name = format!("{:?}", shell).to_lowercase();
                     eprintln!("\n{}", style("Example usage:").yellow().bold());
-                    eprintln!("  jkim completions {} -o ~/.jki/jkim_completion.{}", shell_name, match shell {
-                        clap_complete::Shell::Bash => "bash",
-                        clap_complete::Shell::Zsh => "zsh",
-                        clap_complete::Shell::Fish => "fish",
-                        clap_complete::Shell::PowerShell => "ps1",
-                        _ => "completions"
-                    });
-                    eprintln!("  jkim completions {} -o - > jkim_completions.{}", shell_name, shell_name);
+                    eprintln!(
+                        "  jkim completions {} -o ~/.jki/jkim_completion.{}",
+                        shell_name,
+                        match shell {
+                            clap_complete::Shell::Bash => "bash",
+                            clap_complete::Shell::Zsh => "zsh",
+                            clap_complete::Shell::Fish => "fish",
+                            clap_complete::Shell::PowerShell => "ps1",
+                            _ => "completions",
+                        }
+                    );
+                    eprintln!(
+                        "  jkim completions {} -o - > jkim_completions.{}",
+                        shell_name, shell_name
+                    );
                 }
             }
         }
         Commands::Man => {
             AssetId::GuideMan.render();
         }
-        Commands::Dedupe { keep, discard, yes } =>
-            handle_dedupe(keep, discard, *yes, auth, &interactor, cli.quiet)?,
+        Commands::Dedupe { keep, discard, yes } => {
+            handle_dedupe(keep, discard, *yes, auth, &interactor, cli.quiet)?
+        }
     }
     Ok(())
 }
@@ -1656,12 +2114,40 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_preprocess_args_no_change() {
+        let args = vec!["jkim".to_string(), "status".to_string()];
+        let processed = preprocess_args(args.clone());
+        assert_eq!(processed, args);
+    }
+
+    #[test]
+    fn test_preprocess_args_fuzzy_match() {
+        // "statu" should match "status"
+        let args = vec!["jkim".to_string(), "statu".to_string()];
+        let processed = preprocess_args(args);
+        assert_eq!(processed[1], "status");
+    }
+
+    #[test]
+    fn test_preprocess_args_ignore_flags() {
+        let args = vec![
+            "jkim".to_string(),
+            "-A".to_string(),
+            "auto".to_string(),
+            "status".to_string(),
+        ];
+        let processed = preprocess_args(args.clone());
+        assert_eq!(processed, args);
+    }
+
     use jki_core::AccountType;
-    use serial_test::serial;
-    use tempfile::tempdir;
-    use std::env;
     use jki_core::MockInteractor;
+    use serial_test::serial;
     use std::cell::RefCell;
+    use std::env;
+    use tempfile::tempdir;
 
     #[test]
     #[serial]
@@ -1671,7 +2157,11 @@ mod tests {
         env::set_var("JKI_HOME", &home);
         fs::create_dir_all(&home).unwrap();
 
-        let cmd = MasterKeyCommands::Set { force: false, keychain: false, no_keychain: true };
+        let cmd = MasterKeyCommands::Set {
+            force: false,
+            keychain: false,
+            no_keychain: true,
+        };
         let interactor = MockInteractor {
             prompts: RefCell::new(vec![]),
             passwords: RefCell::new(vec!["newpass".to_string(), "newpass".to_string()]),
@@ -1680,7 +2170,10 @@ mod tests {
         handle_master_key(&cmd, AuthSource::Auto, false, &interactor).unwrap();
 
         assert!(home.join("master.key").exists());
-        assert_eq!(fs::read_to_string(home.join("master.key")).unwrap(), "newpass");
+        assert_eq!(
+            fs::read_to_string(home.join("master.key")).unwrap(),
+            "newpass"
+        );
     }
 
     #[test]
@@ -1699,9 +2192,13 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).unwrap();
         }
-        
+
         let secret_data = b"my secret";
-        let encrypted = encrypt_with_master_key(secret_data, &secrecy::SecretString::from(old_pass.to_string())).unwrap();
+        let encrypted = encrypt_with_master_key(
+            secret_data,
+            &secrecy::SecretString::from(old_pass.to_string()),
+        )
+        .unwrap();
         fs::write(home.join("vault.secrets.bin.age"), encrypted).unwrap();
 
         let cmd = MasterKeyCommands::Change { commit: false };
@@ -1712,10 +2209,17 @@ mod tests {
         };
         handle_master_key(&cmd, AuthSource::Auto, false, &interactor).unwrap();
 
-        assert_eq!(fs::read_to_string(home.join("master.key")).unwrap(), "newpass");
-        
+        assert_eq!(
+            fs::read_to_string(home.join("master.key")).unwrap(),
+            "newpass"
+        );
+
         let new_encrypted = fs::read(home.join("vault.secrets.bin.age")).unwrap();
-        let decrypted = decrypt_with_master_key(&new_encrypted, &secrecy::SecretString::from("newpass".to_string())).unwrap();
+        let decrypted = decrypt_with_master_key(
+            &new_encrypted,
+            &secrecy::SecretString::from("newpass".to_string()),
+        )
+        .unwrap();
         assert_eq!(decrypted, secret_data);
     }
 
@@ -1728,8 +2232,11 @@ mod tests {
         fs::create_dir_all(&home).unwrap();
 
         fs::write(home.join("master.key"), "todelete").unwrap();
-        
-        let cmd = MasterKeyCommands::Remove { force: true, keychain: false };
+
+        let cmd = MasterKeyCommands::Remove {
+            force: true,
+            keychain: false,
+        };
         let interactor = MockInteractor {
             prompts: RefCell::new(vec![]),
             passwords: RefCell::new(vec![]),
@@ -1770,14 +2277,26 @@ mod tests {
         fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).unwrap();
 
         let import_file = temp.path().join("winauth.txt");
-        fs::write(&import_file, "otpauth://totp/Google:test@gmail.com?secret=JBSWY3DPEHPK3PXP&issuer=Google\n").unwrap();
+        fs::write(
+            &import_file,
+            "otpauth://totp/Google:test@gmail.com?secret=JBSWY3DPEHPK3PXP&issuer=Google\n",
+        )
+        .unwrap();
 
         let interactor = MockInteractor {
             prompts: RefCell::new(vec![]),
             passwords: RefCell::new(vec![]),
             confirms: RefCell::new(vec![]),
         };
-        handle_import_winauth(&import_file, false, AuthSource::Auto, true, &interactor, false).unwrap();
+        handle_import_winauth(
+            &import_file,
+            false,
+            AuthSource::Auto,
+            true,
+            &interactor,
+            false,
+        )
+        .unwrap();
 
         let meta_path = home.join("vault.metadata.yaml");
         let sec_path = home.join("vault.secrets.bin.age");
@@ -1802,19 +2321,31 @@ mod tests {
         env::set_var("JKI_HOME", &home);
 
         let import_file = temp.path().join("winauth.txt");
-        fs::write(&import_file, "otpauth://totp/Google:test@gmail.com?secret=JBSWY3DPEHPK3PXP&issuer=Google\n").unwrap();
+        fs::write(
+            &import_file,
+            "otpauth://totp/Google:test@gmail.com?secret=JBSWY3DPEHPK3PXP&issuer=Google\n",
+        )
+        .unwrap();
 
         let key_path = home.join("master.key");
         fs::write(&key_path, "testpass").unwrap();
         fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).unwrap();
-        
+
         let interactor = MockInteractor {
             prompts: RefCell::new(vec![]),
             passwords: RefCell::new(vec![]),
             confirms: RefCell::new(vec![]),
         };
 
-        handle_import_winauth(&import_file, false, AuthSource::Auto, false, &interactor, false).unwrap();
+        handle_import_winauth(
+            &import_file,
+            false,
+            AuthSource::Auto,
+            false,
+            &interactor,
+            false,
+        )
+        .unwrap();
         assert!(home.join("vault.secrets.bin.age").exists());
         assert!(!home.join("vault.secrets.json").exists());
         fs::remove_file(home.join("vault.secrets.bin.age")).unwrap();
@@ -1824,10 +2355,18 @@ mod tests {
         let interactor = MockInteractor {
             prompts: RefCell::new(vec![]),
             passwords: RefCell::new(vec![]),
-            confirms: RefCell::new(vec![true]), 
+            confirms: RefCell::new(vec![true]),
         };
 
-        handle_import_winauth(&import_file, false, AuthSource::Auto, false, &interactor, false).unwrap();
+        handle_import_winauth(
+            &import_file,
+            false,
+            AuthSource::Auto,
+            false,
+            &interactor,
+            false,
+        )
+        .unwrap();
         assert!(home.join("vault.secrets.json").exists());
         assert!(!home.join("vault.secrets.bin.age").exists());
 
@@ -1837,7 +2376,15 @@ mod tests {
             confirms: RefCell::new(vec![]),
         };
 
-        handle_import_winauth(&import_file, true, AuthSource::Auto, false, &interactor, false).unwrap();
+        handle_import_winauth(
+            &import_file,
+            true,
+            AuthSource::Auto,
+            false,
+            &interactor,
+            false,
+        )
+        .unwrap();
         assert!(home.join("vault.secrets.json").exists());
 
         fs::write(&key_path, "testpass").unwrap();
@@ -1845,10 +2392,18 @@ mod tests {
         let interactor = MockInteractor {
             prompts: RefCell::new(vec![]),
             passwords: RefCell::new(vec![]),
-            confirms: RefCell::new(vec![true]), 
+            confirms: RefCell::new(vec![true]),
         };
 
-        handle_import_winauth(&import_file, true, AuthSource::Auto, false, &interactor, false).unwrap();
+        handle_import_winauth(
+            &import_file,
+            true,
+            AuthSource::Auto,
+            false,
+            &interactor,
+            false,
+        )
+        .unwrap();
         assert!(home.join("vault.secrets.bin.age").exists());
         assert!(!home.join("vault.secrets.json").exists());
 
@@ -1858,7 +2413,15 @@ mod tests {
             confirms: RefCell::new(vec![]),
         };
 
-        handle_import_winauth(&import_file, true, AuthSource::Auto, false, &interactor, false).unwrap();
+        handle_import_winauth(
+            &import_file,
+            true,
+            AuthSource::Auto,
+            false,
+            &interactor,
+            false,
+        )
+        .unwrap();
         assert!(home.join("vault.secrets.bin.age").exists());
     }
 
@@ -1870,12 +2433,16 @@ mod tests {
         env::set_var("JKI_HOME", &home);
 
         handle_init(false).unwrap();
-        
+
         fs::write(home.join("test.txt"), "content").unwrap();
-        
-        let interactor = MockInteractor { prompts: std::cell::RefCell::new(vec![]), passwords: std::cell::RefCell::new(vec![]), confirms: std::cell::RefCell::new(vec![]) };
-        handle_sync(false, &interactor).unwrap();
-        
+
+        let interactor = MockInteractor {
+            prompts: std::cell::RefCell::new(vec![]),
+            passwords: std::cell::RefCell::new(vec![]),
+            confirms: std::cell::RefCell::new(vec![]),
+        };
+        handle_git(false, &interactor).unwrap();
+
         let output = Command::new("git")
             .args(["-C", home.to_str().unwrap(), "log", "-n", "1"])
             .output()
@@ -1902,7 +2469,11 @@ mod tests {
         let dec_path = home.join("vault.secrets.json");
         let secrets_map: HashMap<String, AccountSecret> = HashMap::new();
         let secrets_map_json = serde_json::to_vec(&secrets_map).unwrap();
-        let encrypted = encrypt_with_master_key(&secrets_map_json, &secrecy::SecretString::from("testpass".to_string())).unwrap();
+        let encrypted = encrypt_with_master_key(
+            &secrets_map_json,
+            &secrecy::SecretString::from("testpass".to_string()),
+        )
+        .unwrap();
         fs::write(&sec_path, encrypted).unwrap();
 
         let interactor = MockInteractor {
@@ -1910,7 +2481,7 @@ mod tests {
             passwords: RefCell::new(vec!["testpass".to_string()]),
             confirms: RefCell::new(vec![true, false]),
         };
-        
+
         handle_decrypt(false, false, false, false, AuthSource::Auto, &interactor).unwrap();
         assert!(dec_path.exists());
         assert!(!sec_path.exists());
@@ -1930,11 +2501,14 @@ mod tests {
         env::set_var("JKI_HOME", &home);
 
         let meta_path = home.join("vault.metadata.yaml");
-        let initial_meta = MetadataFile { accounts: vec![], version: 1 };
+        let initial_meta = MetadataFile {
+            accounts: vec![],
+            version: 1,
+        };
         fs::write(&meta_path, serde_yaml::to_string(&initial_meta).unwrap()).unwrap();
 
         let editor_script = temp.path().join("mock_editor.sh");
-        let new_meta = MetadataFile { 
+        let new_meta = MetadataFile {
             accounts: vec![Account {
                 id: "1".to_string(),
                 name: "new".to_string(),
@@ -1944,14 +2518,18 @@ mod tests {
                 digits: 6,
                 algorithm: "SHA1".to_string(),
             }],
-            version: 2 
+            version: 2,
         };
         let new_json = serde_yaml::to_string(&new_meta).unwrap();
-        
+
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::write(&editor_script, format!("#!/bin/sh\necho '{}' > \"$1\"", new_json)).unwrap();
+            fs::write(
+                &editor_script,
+                format!("#!/bin/sh\necho '{}' > \"$1\"", new_json),
+            )
+            .unwrap();
             fs::set_permissions(&editor_script, fs::Permissions::from_mode(0o755)).unwrap();
         }
         #[cfg(windows)]
@@ -1963,7 +2541,8 @@ mod tests {
 
         handle_edit().unwrap();
 
-        let updated_meta: MetadataFile = serde_yaml::from_str(&fs::read_to_string(&meta_path).unwrap()).unwrap();
+        let updated_meta: MetadataFile =
+            serde_yaml::from_str(&fs::read_to_string(&meta_path).unwrap()).unwrap();
         assert_eq!(updated_meta.version, 2);
         assert_eq!(updated_meta.accounts.len(), 1);
     }
@@ -1987,37 +2566,59 @@ mod tests {
                 secret: "".to_string(),
                 digits: 6,
                 algorithm: "SHA1".to_string(),
-            }]
+            }],
         };
-        fs::write(home.join("vault.metadata.yaml"), serde_yaml::to_string(&metadata).unwrap()).unwrap();
+        fs::write(
+            home.join("vault.metadata.yaml"),
+            serde_yaml::to_string(&metadata).unwrap(),
+        )
+        .unwrap();
 
         // 2. Setup secrets (Plaintext for simplicity in test)
         let mut secrets_map = HashMap::new();
-        secrets_map.insert("test-id".to_string(), AccountSecret {
-            secret: "JBSWY3DPEHPK3PXP".to_string(),
-            digits: 6,
-            algorithm: "SHA1".to_string(),
-        });
-        fs::write(home.join("vault.secrets.json"), serde_json::to_vec(&secrets_map).unwrap()).unwrap();
+        secrets_map.insert(
+            "test-id".to_string(),
+            AccountSecret {
+                secret: "JBSWY3DPEHPK3PXP".to_string(),
+                digits: 6,
+                algorithm: "SHA1".to_string(),
+            },
+        );
+        fs::write(
+            home.join("vault.secrets.json"),
+            serde_json::to_vec(&secrets_map).unwrap(),
+        )
+        .unwrap();
 
         // 3. Mock interactions (Master Key, then Export Password x2)
         let interactor = MockInteractor {
             prompts: RefCell::new(vec![]),
-            passwords: RefCell::new(vec!["master_pass".to_string(), "zippass".to_string(), "zippass".to_string()]),
+            passwords: RefCell::new(vec![
+                "master_pass".to_string(),
+                "zippass".to_string(),
+                "zippass".to_string(),
+            ]),
             confirms: RefCell::new(vec![]),
         };
 
         let zip_path = temp.path().join("test_export.zip");
-        handle_export(&Some(zip_path.clone()), AuthSource::Interactive, &interactor).unwrap();
+        handle_export(
+            &Some(zip_path.clone()),
+            AuthSource::Interactive,
+            &interactor,
+        )
+        .unwrap();
 
         assert!(zip_path.exists());
-        
+
         // 4. Verify ZIP content
         let zip_file = fs::File::open(&zip_path).unwrap();
         let mut archive = zip::ZipArchive::new(zip_file).unwrap();
         assert_eq!(archive.len(), 1);
-        
-        let mut file = archive.by_index_decrypt(0, b"zippass").expect("Failed to decrypt or find file in ZIP");
+
+        let mut file = archive
+            .by_index_decrypt(0, b"zippass")
+            .expect("Failed to decrypt or find file in ZIP");
         assert_eq!(file.name(), "accounts.txt");
         let mut content = String::new();
         file.read_to_string(&mut content).unwrap();
@@ -2032,20 +2633,34 @@ mod tests {
         env::set_var("JKI_HOME", &home);
         fs::create_dir_all(&home).unwrap();
 
-        let metadata = MetadataFile { version: 1, accounts: vec![] };
-        fs::write(home.join("vault.metadata.yaml"), serde_yaml::to_string(&metadata).unwrap()).unwrap();
+        let metadata = MetadataFile {
+            version: 1,
+            accounts: vec![],
+        };
+        fs::write(
+            home.join("vault.metadata.yaml"),
+            serde_yaml::to_string(&metadata).unwrap(),
+        )
+        .unwrap();
         fs::write(home.join("vault.secrets.json"), b"{}").unwrap();
 
         // Master Key, then Mismatched export passwords
         let interactor = MockInteractor {
             prompts: RefCell::new(vec![]),
-            passwords: RefCell::new(vec!["master_pass".to_string(), "zippass".to_string(), "WRONGpass".to_string()]),
+            passwords: RefCell::new(vec![
+                "master_pass".to_string(),
+                "zippass".to_string(),
+                "WRONGpass".to_string(),
+            ]),
             confirms: RefCell::new(vec![]),
         };
 
         let res = handle_export(&None, AuthSource::Interactive, &interactor);
         assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("Passwords do not match"));
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("Passwords do not match"));
     }
 
     #[test]
@@ -2068,31 +2683,68 @@ mod tests {
                 secret: "".to_string(),
                 digits: 6,
                 algorithm: "SHA1".to_string(),
-            }]
+            }],
         };
-        fs::write(home.join("vault.metadata.yaml"), serde_yaml::to_string(&metadata).unwrap()).unwrap();
+        fs::write(
+            home.join("vault.metadata.yaml"),
+            serde_yaml::to_string(&metadata).unwrap(),
+        )
+        .unwrap();
         let mut secrets_map = HashMap::new();
-        secrets_map.insert(acc_id.to_string(), AccountSecret {
-            secret: "OLDSECRET".to_string(),
-            digits: 6,
-            algorithm: "SHA1".to_string(),
-        });
-        fs::write(home.join("vault.secrets.json"), serde_json::to_vec(&secrets_map).unwrap()).unwrap();
+        secrets_map.insert(
+            acc_id.to_string(),
+            AccountSecret {
+                secret: "OLDSECRET".to_string(),
+                digits: 6,
+                algorithm: "SHA1".to_string(),
+            },
+        );
+        fs::write(
+            home.join("vault.secrets.json"),
+            serde_json::to_vec(&secrets_map).unwrap(),
+        )
+        .unwrap();
 
         // 2. Import file with same account but NEW secret
         let import_file = temp.path().join("import.txt");
-        fs::write(&import_file, "otpauth://totp/Google:test%40gmail.com?secret=NEWSECRET123&issuer=Google").unwrap();
+        fs::write(
+            &import_file,
+            "otpauth://totp/Google:test%40gmail.com?secret=NEWSECRET123&issuer=Google",
+        )
+        .unwrap();
 
-        let interactor = MockInteractor { prompts: RefCell::new(vec![]), passwords: RefCell::new(vec![]), confirms: RefCell::new(vec![]) };
+        let interactor = MockInteractor {
+            prompts: RefCell::new(vec![]),
+            passwords: RefCell::new(vec![]),
+            confirms: RefCell::new(vec![]),
+        };
 
         // Test Skip (overwrite = false)
-        handle_import_winauth(&import_file, false, AuthSource::Auto, true, &interactor, false).unwrap();
-        let current_secrets: HashMap<String, AccountSecret> = serde_json::from_slice(&fs::read(home.join("vault.secrets.json")).unwrap()).unwrap();
+        handle_import_winauth(
+            &import_file,
+            false,
+            AuthSource::Auto,
+            true,
+            &interactor,
+            false,
+        )
+        .unwrap();
+        let current_secrets: HashMap<String, AccountSecret> =
+            serde_json::from_slice(&fs::read(home.join("vault.secrets.json")).unwrap()).unwrap();
         assert_eq!(current_secrets.get(acc_id).unwrap().secret, "OLDSECRET");
 
         // Test Overwrite (overwrite = true)
-        handle_import_winauth(&import_file, true, AuthSource::Auto, true, &interactor, false).unwrap();
-        let current_secrets: HashMap<String, AccountSecret> = serde_json::from_slice(&fs::read(home.join("vault.secrets.json")).unwrap()).unwrap();
+        handle_import_winauth(
+            &import_file,
+            true,
+            AuthSource::Auto,
+            true,
+            &interactor,
+            false,
+        )
+        .unwrap();
+        let current_secrets: HashMap<String, AccountSecret> =
+            serde_json::from_slice(&fs::read(home.join("vault.secrets.json")).unwrap()).unwrap();
         assert_eq!(current_secrets.get(acc_id).unwrap().secret, "NEWSECRET123");
     }
 
@@ -2105,14 +2757,29 @@ mod tests {
         fs::create_dir_all(&home).unwrap();
 
         // Metadata exists, but no secrets files
-        fs::write(home.join("vault.metadata.yaml"), "{\"accounts\":[],\"version\":1}").unwrap();
+        fs::write(
+            home.join("vault.metadata.yaml"),
+            "{\"accounts\":[],\"version\":1}",
+        )
+        .unwrap();
 
         let import_file = temp.path().join("import.txt");
         fs::write(&import_file, "otpauth://totp/test?secret=S1").unwrap();
 
-        let interactor = MockInteractor { prompts: RefCell::new(vec![]), passwords: RefCell::new(vec![]), confirms: RefCell::new(vec![]) };
-        let res = handle_import_winauth(&import_file, false, AuthSource::Auto, true, &interactor, false);
-        
+        let interactor = MockInteractor {
+            prompts: RefCell::new(vec![]),
+            passwords: RefCell::new(vec![]),
+            confirms: RefCell::new(vec![]),
+        };
+        let res = handle_import_winauth(
+            &import_file,
+            false,
+            AuthSource::Auto,
+            true,
+            &interactor,
+            false,
+        );
+
         assert!(res.is_err());
         assert!(res.unwrap_err().to_string().contains("Vault corrupted"));
     }
@@ -2130,7 +2797,11 @@ mod tests {
         let real_key = secrecy::SecretString::from("correct".to_string());
         let encrypted = encrypt_with_master_key(b"{}", &real_key).unwrap();
         fs::write(home.join("vault.secrets.bin.age"), encrypted).unwrap();
-        fs::write(home.join("vault.metadata.yaml"), "{\"accounts\":[],\"version\":1}").unwrap();
+        fs::write(
+            home.join("vault.metadata.yaml"),
+            "{\"accounts\":[],\"version\":1}",
+        )
+        .unwrap();
 
         let import_file = temp.path().join("import.txt");
         fs::write(&import_file, "otpauth://totp/test?secret=S1").unwrap();
@@ -2143,13 +2814,34 @@ mod tests {
         };
 
         // Should fail without force_new_vault
-        let res = handle_import_winauth(&import_file, false, AuthSource::Interactive, false, &interactor, false);
+        let res = handle_import_winauth(
+            &import_file,
+            false,
+            AuthSource::Interactive,
+            false,
+            &interactor,
+            false,
+        );
         assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("Master Key incorrect"));
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("Master Key incorrect"));
 
         // Should succeed with force_new_vault
-        interactor.passwords.borrow_mut().push("wrong_key".to_string());
-        handle_import_winauth(&import_file, false, AuthSource::Interactive, false, &interactor, true).unwrap();
+        interactor
+            .passwords
+            .borrow_mut()
+            .push("wrong_key".to_string());
+        handle_import_winauth(
+            &import_file,
+            false,
+            AuthSource::Interactive,
+            false,
+            &interactor,
+            true,
+        )
+        .unwrap();
         assert!(home.join("vault.secrets.bin.age").exists());
     }
 
@@ -2182,9 +2874,26 @@ mod tests {
         handle_init(false).unwrap();
 
         let uri = "otpauth://totp/Google:test@gmail.com?secret=JBSWY3DPEHPK3PXP&issuer=Google";
-        let interactor = jki_core::MockInteractor { prompts: RefCell::new(vec![]), passwords: RefCell::new(vec![]), confirms: RefCell::new(vec![]) };
-        
-        handle_add(&None, &None, &None, &Some(uri.to_string()), false, false, false, AuthSource::Auto, true, true, &interactor).unwrap();
+        let interactor = jki_core::MockInteractor {
+            prompts: RefCell::new(vec![]),
+            passwords: RefCell::new(vec![]),
+            confirms: RefCell::new(vec![]),
+        };
+
+        handle_add(
+            &None,
+            &None,
+            &None,
+            &Some(uri.to_string()),
+            false,
+            false,
+            false,
+            AuthSource::Auto,
+            true,
+            true,
+            &interactor,
+        )
+        .unwrap();
 
         let meta_content = fs::read_to_string(home.join("vault.metadata.yaml")).unwrap();
         let metadata: MetadataFile = serde_yaml::from_str(&meta_content).unwrap();
@@ -2209,10 +2918,27 @@ mod tests {
         // Secret with spaces and lowercase
         let name = Some("test".to_string());
         let issuer = Some("Service".to_string());
-        let secret = Some("jbsw y3dp ehpk 3pxp".to_string()); 
-        
-        let interactor = jki_core::MockInteractor { prompts: RefCell::new(vec![]), passwords: RefCell::new(vec![]), confirms: RefCell::new(vec![]) };
-        handle_add(&name, &issuer, &secret, &None, false, false, false, AuthSource::Auto, true, true, &interactor).unwrap();
+        let secret = Some("jbsw y3dp ehpk 3pxp".to_string());
+
+        let interactor = jki_core::MockInteractor {
+            prompts: RefCell::new(vec![]),
+            passwords: RefCell::new(vec![]),
+            confirms: RefCell::new(vec![]),
+        };
+        handle_add(
+            &name,
+            &issuer,
+            &secret,
+            &None,
+            false,
+            false,
+            false,
+            AuthSource::Auto,
+            true,
+            true,
+            &interactor,
+        )
+        .unwrap();
 
         let meta_content = fs::read_to_string(home.join("vault.metadata.yaml")).unwrap();
         let metadata: MetadataFile = serde_yaml::from_str(&meta_content).unwrap();
@@ -2235,19 +2961,61 @@ mod tests {
         let name = Some("test".to_string());
         let issuer = Some("Service".to_string());
         let secret = Some("JBSWY3DPEHPK3PXP".to_string());
-        let interactor = jki_core::MockInteractor { prompts: RefCell::new(vec![]), passwords: RefCell::new(vec![]), confirms: RefCell::new(vec![]) };
+        let interactor = jki_core::MockInteractor {
+            prompts: RefCell::new(vec![]),
+            passwords: RefCell::new(vec![]),
+            confirms: RefCell::new(vec![]),
+        };
 
         // First add
-        handle_add(&name, &issuer, &secret, &None, false, false, false, AuthSource::Auto, true, true, &interactor).unwrap();
+        handle_add(
+            &name,
+            &issuer,
+            &secret,
+            &None,
+            false,
+            false,
+            false,
+            AuthSource::Auto,
+            true,
+            true,
+            &interactor,
+        )
+        .unwrap();
 
         // Second add without force -> Conflict
-        let res = handle_add(&name, &issuer, &Some("NEWSECRET".to_string()), &None, false, false, false, AuthSource::Auto, true, true, &interactor);
+        let res = handle_add(
+            &name,
+            &issuer,
+            &Some("NEWSECRET".to_string()),
+            &None,
+            false,
+            false,
+            false,
+            AuthSource::Auto,
+            true,
+            true,
+            &interactor,
+        );
         assert!(res.is_err());
         assert!(res.unwrap_err().to_string().contains("already exists"));
 
         // Third add WITH force -> Success
-        handle_add(&name, &issuer, &Some("NEWSECRET".to_string()), &None, true, false, false, AuthSource::Auto, true, true, &interactor).unwrap();
-        
+        handle_add(
+            &name,
+            &issuer,
+            &Some("NEWSECRET".to_string()),
+            &None,
+            true,
+            false,
+            false,
+            AuthSource::Auto,
+            true,
+            true,
+            &interactor,
+        )
+        .unwrap();
+
         let sec_content = fs::read(home.join("vault.secrets.json")).unwrap();
         let secrets: HashMap<String, AccountSecret> = serde_json::from_slice(&sec_content).unwrap();
         let meta_content = fs::read_to_string(home.join("vault.metadata.yaml")).unwrap();
@@ -2267,11 +3035,28 @@ mod tests {
         let name = Some("test".to_string());
         let issuer = Some("Service".to_string());
         let secret = Some("JBSWY3DPEHPK3PXP".to_string());
-        let interactor = jki_core::MockInteractor { prompts: RefCell::new(vec![]), passwords: RefCell::new(vec![]), confirms: RefCell::new(vec![]) };
+        let interactor = jki_core::MockInteractor {
+            prompts: RefCell::new(vec![]),
+            passwords: RefCell::new(vec![]),
+            confirms: RefCell::new(vec![]),
+        };
 
         // Test that it runs with show_secret = true
-        handle_add(&name, &issuer, &secret, &None, false, true, false, AuthSource::Auto, true, true, &interactor).unwrap();
-        
+        handle_add(
+            &name,
+            &issuer,
+            &secret,
+            &None,
+            false,
+            true,
+            false,
+            AuthSource::Auto,
+            true,
+            true,
+            &interactor,
+        )
+        .unwrap();
+
         let meta_content = fs::read_to_string(home.join("vault.metadata.yaml")).unwrap();
         let metadata: MetadataFile = serde_yaml::from_str(&meta_content).unwrap();
         assert_eq!(metadata.accounts.len(), 1);
@@ -2289,19 +3074,72 @@ mod tests {
         let metadata = MetadataFile {
             version: 1,
             accounts: vec![
-                Account { id: "1".to_string(), name: "user1".to_string(), issuer: Some("Google".to_string()), account_type: AccountType::Standard, secret: "".to_string(), digits: 6, algorithm: "SHA1".to_string() },
-                Account { id: "2".to_string(), name: "user1@gmail.com".to_string(), issuer: Some("Google".to_string()), account_type: AccountType::Standard, secret: "".to_string(), digits: 6, algorithm: "SHA1".to_string() },
-                Account { id: "3".to_string(), name: "other".to_string(), issuer: None, account_type: AccountType::Standard, secret: "".to_string(), digits: 6, algorithm: "SHA1".to_string() },
-            ]
+                Account {
+                    id: "1".to_string(),
+                    name: "user1".to_string(),
+                    issuer: Some("Google".to_string()),
+                    account_type: AccountType::Standard,
+                    secret: "".to_string(),
+                    digits: 6,
+                    algorithm: "SHA1".to_string(),
+                },
+                Account {
+                    id: "2".to_string(),
+                    name: "user1@gmail.com".to_string(),
+                    issuer: Some("Google".to_string()),
+                    account_type: AccountType::Standard,
+                    secret: "".to_string(),
+                    digits: 6,
+                    algorithm: "SHA1".to_string(),
+                },
+                Account {
+                    id: "3".to_string(),
+                    name: "other".to_string(),
+                    issuer: None,
+                    account_type: AccountType::Standard,
+                    secret: "".to_string(),
+                    digits: 6,
+                    algorithm: "SHA1".to_string(),
+                },
+            ],
         };
-        fs::write(home.join("vault.metadata.yaml"), serde_yaml::to_string(&metadata).unwrap()).unwrap();
+        fs::write(
+            home.join("vault.metadata.yaml"),
+            serde_yaml::to_string(&metadata).unwrap(),
+        )
+        .unwrap();
 
         // 2. Setup secrets (1 and 2 are duplicates)
         let mut secrets_map = HashMap::new();
-        secrets_map.insert("1".to_string(), AccountSecret { secret: "JBSWY3DPEHPK3PXP".to_string(), digits: 6, algorithm: "SHA1".to_string() });
-        secrets_map.insert("2".to_string(), AccountSecret { secret: "JBSWY3DPEHPK3PXP".to_string(), digits: 6, algorithm: "SHA1".to_string() });
-        secrets_map.insert("3".to_string(), AccountSecret { secret: "DIFFERENT".to_string(), digits: 6, algorithm: "SHA1".to_string() });
-        fs::write(home.join("vault.secrets.json"), serde_json::to_vec(&secrets_map).unwrap()).unwrap();
+        secrets_map.insert(
+            "1".to_string(),
+            AccountSecret {
+                secret: "JBSWY3DPEHPK3PXP".to_string(),
+                digits: 6,
+                algorithm: "SHA1".to_string(),
+            },
+        );
+        secrets_map.insert(
+            "2".to_string(),
+            AccountSecret {
+                secret: "JBSWY3DPEHPK3PXP".to_string(),
+                digits: 6,
+                algorithm: "SHA1".to_string(),
+            },
+        );
+        secrets_map.insert(
+            "3".to_string(),
+            AccountSecret {
+                secret: "DIFFERENT".to_string(),
+                digits: 6,
+                algorithm: "SHA1".to_string(),
+            },
+        );
+        fs::write(
+            home.join("vault.secrets.json"),
+            serde_json::to_vec(&secrets_map).unwrap(),
+        )
+        .unwrap();
 
         let interactor = jki_core::MockInteractor {
             prompts: RefCell::new(vec![]),
@@ -2310,7 +3148,15 @@ mod tests {
         };
 
         // 3. Run dedupe: keep index 2 (user1@gmail.com), index 1 should be removed
-        handle_dedupe(&vec![2], &vec![], false, AuthSource::Auto, &interactor, true).unwrap();
+        handle_dedupe(
+            &vec![2],
+            &vec![],
+            false,
+            AuthSource::Auto,
+            &interactor,
+            true,
+        )
+        .unwrap();
 
         let meta_content = fs::read_to_string(home.join("vault.metadata.yaml")).unwrap();
         let updated_meta: MetadataFile = serde_yaml::from_str(&meta_content).unwrap();
@@ -2321,7 +3167,8 @@ mod tests {
         assert!(!updated_meta.accounts.iter().any(|a| a.id == "1"));
 
         let sec_content = fs::read(home.join("vault.secrets.json")).unwrap();
-        let updated_secrets: HashMap<String, AccountSecret> = serde_json::from_slice(&sec_content).unwrap();
+        let updated_secrets: HashMap<String, AccountSecret> =
+            serde_json::from_slice(&sec_content).unwrap();
         assert_eq!(updated_secrets.len(), 2);
         assert!(!updated_secrets.contains_key("1"));
     }
@@ -2337,16 +3184,54 @@ mod tests {
         let metadata = MetadataFile {
             version: 1,
             accounts: vec![
-                Account { id: "1".to_string(), name: "user1".to_string(), issuer: Some("Google".to_string()), account_type: AccountType::Standard, secret: "".to_string(), digits: 6, algorithm: "SHA1".to_string() },
-                Account { id: "2".to_string(), name: "user2".to_string(), issuer: Some("Google".to_string()), account_type: AccountType::Standard, secret: "".to_string(), digits: 6, algorithm: "SHA1".to_string() },
-            ]
+                Account {
+                    id: "1".to_string(),
+                    name: "user1".to_string(),
+                    issuer: Some("Google".to_string()),
+                    account_type: AccountType::Standard,
+                    secret: "".to_string(),
+                    digits: 6,
+                    algorithm: "SHA1".to_string(),
+                },
+                Account {
+                    id: "2".to_string(),
+                    name: "user2".to_string(),
+                    issuer: Some("Google".to_string()),
+                    account_type: AccountType::Standard,
+                    secret: "".to_string(),
+                    digits: 6,
+                    algorithm: "SHA1".to_string(),
+                },
+            ],
         };
-        fs::write(home.join("vault.metadata.yaml"), serde_yaml::to_string(&metadata).unwrap()).unwrap();
+        fs::write(
+            home.join("vault.metadata.yaml"),
+            serde_yaml::to_string(&metadata).unwrap(),
+        )
+        .unwrap();
 
         let mut secrets_map = HashMap::new();
-        secrets_map.insert("1".to_string(), AccountSecret { secret: "DUP".to_string(), digits: 6, algorithm: "SHA1".to_string() });
-        secrets_map.insert("2".to_string(), AccountSecret { secret: "DUP".to_string(), digits: 6, algorithm: "SHA1".to_string() });
-        fs::write(home.join("vault.secrets.json"), serde_json::to_vec(&secrets_map).unwrap()).unwrap();
+        secrets_map.insert(
+            "1".to_string(),
+            AccountSecret {
+                secret: "DUP".to_string(),
+                digits: 6,
+                algorithm: "SHA1".to_string(),
+            },
+        );
+        secrets_map.insert(
+            "2".to_string(),
+            AccountSecret {
+                secret: "DUP".to_string(),
+                digits: 6,
+                algorithm: "SHA1".to_string(),
+            },
+        );
+        fs::write(
+            home.join("vault.secrets.json"),
+            serde_json::to_vec(&secrets_map).unwrap(),
+        )
+        .unwrap();
 
         let interactor = jki_core::MockInteractor {
             prompts: RefCell::new(vec![]),
@@ -2355,7 +3240,15 @@ mod tests {
         };
 
         // Discard index 1
-        handle_dedupe(&vec![], &vec![1], false, AuthSource::Auto, &interactor, true).unwrap();
+        handle_dedupe(
+            &vec![],
+            &vec![1],
+            false,
+            AuthSource::Auto,
+            &interactor,
+            true,
+        )
+        .unwrap();
 
         let meta_content = fs::read_to_string(home.join("vault.metadata.yaml")).unwrap();
         let updated_meta: MetadataFile = serde_yaml::from_str(&meta_content).unwrap();
@@ -2374,15 +3267,53 @@ mod tests {
         let metadata = MetadataFile {
             version: 1,
             accounts: vec![
-                Account { id: "1".to_string(), name: "u".to_string(), issuer: None, account_type: AccountType::Standard, secret: "".to_string(), digits: 6, algorithm: "SHA1".to_string() },
-                Account { id: "2".to_string(), name: "u".to_string(), issuer: None, account_type: AccountType::Standard, secret: "".to_string(), digits: 6, algorithm: "SHA1".to_string() },
-            ]
+                Account {
+                    id: "1".to_string(),
+                    name: "u".to_string(),
+                    issuer: None,
+                    account_type: AccountType::Standard,
+                    secret: "".to_string(),
+                    digits: 6,
+                    algorithm: "SHA1".to_string(),
+                },
+                Account {
+                    id: "2".to_string(),
+                    name: "u".to_string(),
+                    issuer: None,
+                    account_type: AccountType::Standard,
+                    secret: "".to_string(),
+                    digits: 6,
+                    algorithm: "SHA1".to_string(),
+                },
+            ],
         };
-        fs::write(home.join("vault.metadata.yaml"), serde_yaml::to_string(&metadata).unwrap()).unwrap();
+        fs::write(
+            home.join("vault.metadata.yaml"),
+            serde_yaml::to_string(&metadata).unwrap(),
+        )
+        .unwrap();
         let mut secrets_map = HashMap::new();
-        secrets_map.insert("1".to_string(), AccountSecret { secret: "S".to_string(), digits: 6, algorithm: "SHA1".to_string() });
-        secrets_map.insert("2".to_string(), AccountSecret { secret: "S".to_string(), digits: 6, algorithm: "SHA1".to_string() });
-        fs::write(home.join("vault.secrets.json"), serde_json::to_vec(&secrets_map).unwrap()).unwrap();
+        secrets_map.insert(
+            "1".to_string(),
+            AccountSecret {
+                secret: "S".to_string(),
+                digits: 6,
+                algorithm: "SHA1".to_string(),
+            },
+        );
+        secrets_map.insert(
+            "2".to_string(),
+            AccountSecret {
+                secret: "S".to_string(),
+                digits: 6,
+                algorithm: "SHA1".to_string(),
+            },
+        );
+        fs::write(
+            home.join("vault.secrets.json"),
+            serde_json::to_vec(&secrets_map).unwrap(),
+        )
+        .unwrap();
 
         let interactor = jki_core::MockInteractor {
             prompts: RefCell::new(vec![]),
@@ -2391,7 +3322,14 @@ mod tests {
         };
 
         // Conflict: keep and discard the same index
-        let res = handle_dedupe(&vec![1], &vec![1], false, AuthSource::Auto, &interactor, true);
+        let res = handle_dedupe(
+            &vec![1],
+            &vec![1],
+            false,
+            AuthSource::Auto,
+            &interactor,
+            true,
+        );
         assert!(res.is_err());
         assert!(res.unwrap_err().to_string().contains("Conflict"));
     }

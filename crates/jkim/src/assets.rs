@@ -1,5 +1,5 @@
-use termimad::{MadSkin, crossterm::style::Color};
 use console::style;
+use termimad::{crossterm::style::Color, MadSkin};
 
 pub enum AssetId {
     GuideCompletions,
