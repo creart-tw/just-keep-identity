@@ -36,8 +36,9 @@ To ensure tests and CI/CD are not interrupted by OS authorization prompts (e.g.,
 - **Safety**: Never include contents from ignored or private directories in git commits.
 
 ### 2.5 Strategic Edit Mandates (Atomic Edits)
-- **Coordinate-Anchored Edit (CAE)**: The `edit` tool now **requires** `startLine` and `endLine`. The agent MUST use the `Read` tool first to verify the exact physical coordinates.
+- **Coordinate-Anchored Edit (CAE)**: The `edit` tool **MUST** be used with `startLine` and `endLine`. The agent MUST use the `Read` tool first to verify the exact physical coordinates.
+- **No Redundant Parameters**: **CRITICAL**: The parameter `expectedOldLineCount` does NOT exist in the current tool schema. NEVER include it in the `edit` tool call.
 - **Coordination Rule**: To avoid counting errors (LLM limitation), the agent MUST use the physical line numbers from the `Read` tool to define the range and verify the bit-by-bit content.
 - **Checksum Logic**: The tool automatically performs a strict comparison. If the content at `[startLine, endLine]` doesn't match `oldString` exactly (including whitespace), the edit will fail.
 - **Safety Guard**: The tool will block edits that remove sensitive patterns (like `# <SECURE>`, `# Private`) unless they are explicitly preserved in the `newString`.
-- **Diagnostics**: If an edit fails or succeeds, the tool provides physical coordinates and hints about format mismatches (like indentation or line endings) to help you correct your intent.
+- **Diagnostics**: Use the tool's feedback (physical coordinates and format hints) to correct any mismatches.

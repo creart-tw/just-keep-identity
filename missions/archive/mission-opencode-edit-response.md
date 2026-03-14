@@ -15,7 +15,7 @@
 
 ### 2.1 結構化診斷資訊 (已實作)
 
-- **現狀**：工具已不再僅回傳純文字錯誤。當 `expectedOldLineCount` 不符時，系統會精確計算並回傳：
+- **現狀**：工具已不再僅回傳純文字錯誤。當內容與座標不符時，系統會精確計算並回傳：
   - `actualLineCount` (實際數到的行數)
   - `lineRange` (匹配區塊在原始檔案中的物理起止行號，如 `lines 40-42`)
 - **效益**：這大幅縮短了 Agent 的認知校正路徑，使其能立即理解物理空間的落差。
@@ -36,7 +36,7 @@
 
 基於本次成功的加固經驗，我們提議將以下規範列入 Opencode 官方工具標準：
 
-1.  **契約式編輯 (Contractual Editing)**：將 `expectedOldLineCount` 列為生產環境 Agent 的必填項。
+1.  **契約式編輯 (Contractual Editing)**：將 `startLine` 與 `endLine` 列為生產環境 Agent 的必選參數。
 2.  **物理座標回饋 (Physical Feedback Loop)**：所有檔案修改工具應回報物理行號，建立 AI 與磁碟現狀的強連結。
 3.  **防禦性 UI 顯示**：在 TUI 中，若觸發敏感保護攔截，應以高亮警告形式呈現給使用者。
 
