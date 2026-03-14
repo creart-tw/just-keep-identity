@@ -29,6 +29,10 @@ export HOMEBREW_CELLAR="$JKI_PURITY_DIR/Cellar"
 export HOMEBREW_REPOSITORY="$JKI_PURITY_DIR"
 export HOMEBREW_CACHE="$JKI_PURITY_DIR/cache"
 
+# 關鍵：禁用自動更新，避免 brew 因為找不到自己的 .git 而報錯
+export HOMEBREW_NO_AUTO_UPDATE=1
+export HOMEBREW_NO_INSTALL_FROM_API=1
+
 # 2. 建立本地 Tap 目錄並連結 (Homebrew 4.0+ 必須有 Tap 結構)
 # 這樣可以直接測試你本地還沒 push 的 jki.rb
 export TAP_DEST="$JKI_PURITY_DIR/Library/Taps/lichih/homebrew-jki/Formula"
@@ -50,10 +54,10 @@ brew install jki
 ```
 
 ### B. 測試本地修改 (Pre-push 驗證)
-如果你已經執行了上面的 `cp` 步驟，直接執行安裝即可：
+如果你已經執行了上面的 `cp` 步驟，直接指定 **Formula 完整路徑** 執行安裝即可：
 ```bash
-# 這裡會優先使用你剛才複製到 Library/Taps/... 的本地 jki.rb
-brew install --verbose --debug jki
+# 讓 brew 直接加載該本地檔案
+brew install --verbose --debug "$TAP_DEST/jki.rb"
 
 # 驗證二進位檔路徑
 "$JKI_PURITY_DIR/bin/jki" --version
@@ -62,7 +66,7 @@ brew install --verbose --debug jki
 ### C. 測試源碼編譯 (Source Build)
 ```bash
 brew uninstall jki
-brew install --build-from-source --verbose --debug jki
+brew install --build-from-source --verbose --debug "$TAP_DEST/jki.rb"
 ```
 
 ## 4. 為什麼這個方案更可信？
