@@ -19,7 +19,7 @@
 
 Built with Rust for extreme stability and security:
 
-*   **Intelligent Agent**: `jki-agent` manages decrypted memory cache. It's the secure gateway to OS Keyring integration.
+*   **Intelligent Agent**: `jki-agent` manages decrypted memory cache. It features an **automatic TTL (1-hour session)** that wipes secrets from memory after inactivity, ensuring your secrets are never left exposed in RAM indefinitely.
 *   **Hybrid Vault**:
     *   **Metadata**: Managed via local files and Git for versioning.
     *   **Secrets**: Directly integrated with OS Keyring (macOS Keychain, Linux Secret Service).

@@ -19,8 +19,9 @@
 
 `jki` 採用 Rust 構建，追求極致的穩定性與安全性：
 
-*   **智慧型代理 (Intelligent Agent)**: `jki-agent` 持有解密後的記憶體快取。它是系統中唯一與 OS Keyring 互動的門戶。
-*   **混合金庫 (Hybrid Vault)**: 
+*   **智慧型代理 (Intelligent Agent)**: `jki-agent` 持有解密後的記憶體快取。它具備 **自動 TTL 機制 (預設 1 小時)**，會在閒置後自動清理記憶體中的秘密，確保金鑰不會永久殘留在 RAM 中。
+*   **混合金庫 (Hybrid Vault)**:
+
     *   **元數據 (Metadata)**: 透過本地檔案管理，支援 Git 版本控制。
     *   **金鑰秘密 (Secrets)**: 直接與 OS 原生 Keyring (macOS Keychain, Linux Secret Service) 整合。
 *   **Unix-Friendly**: 完美的管道支援 (`stdout -`)，輕鬆與 `ssh`, `git`, `kubectl` 等工具整合。
