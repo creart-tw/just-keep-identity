@@ -15,3 +15,9 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/lichih/just-keep-identity"
 homepage = "https://github.com/lichih/just-keep-identity"
 description = "JK Suite: High-speed MFA & Identity Session Manager for CLI Power Users"
+
+[workspace.metadata.release]
+tag-prefix = "v"
+shared-version = true
+pre-release-commit-message = "chore: release version {{version}}"
+tag-message = "Version {{version}}"
