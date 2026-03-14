@@ -8,7 +8,7 @@ echo "--- JKI Security Audit ---"
 
 # 1. Verify .gitignore integrity
 echo -n "Checking .gitignore for critical exclusions... "
-CRITICAL_PATTERNS=("private/" "data/" "master.key" "vault.json" "config.json")
+CRITICAL_PATTERNS=("private/" "data/" "master.key" "vault.json" "config.json" ".env.macos")
 for pattern in "${CRITICAL_PATTERNS[@]}"; do
     if ! grep -q "^$pattern" .gitignore && ! grep -q "/$pattern" .gitignore; then
         echo -e "\n[ERROR] Missing critical exclusion: $pattern"

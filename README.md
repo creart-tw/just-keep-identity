@@ -14,12 +14,15 @@
 *   **Smart Agent**: Intelligent background agent supporting auto-unlock for plaintext vaults and active disk synchronization (Active Reload).
 *   **Physical Isolation**: Built on OS Keyring. Your secrets stay in your system's secure enclave—zero cloud dependency.
 *   **CLI Ergonomics**: Optimized Micro-Roll command set (`j-k-i`), allowing for one-handed operation.
+*   **Tiered Distribution**:
+    *   **macOS**: Full suite with GUI/Tray agent, **officially signed and notarized** for a seamless experience.
+    *   **Linux & Windows**: Lightweight **CLI-only** core. Fast, portable, and integrates directly with your OS native keyring.
 
 ## 🧬 Technical DNA
 
 Built with Rust for extreme stability and security:
 
-*   **Intelligent Agent**: `jki-agent` manages decrypted memory cache. It features an **automatic TTL (1-hour session)** that wipes secrets from memory after inactivity, ensuring your secrets are never left exposed in RAM indefinitely.
+*   **Intelligent Agent**: `jki-agent` manages decrypted memory cache. It features an **automatic TTL (1-hour session)** that wipes secrets from memory after inactivity. *(Currently optimized for macOS)*.
 *   **Hybrid Vault**:
     *   **Metadata**: Managed via local files and Git for versioning.
     *   **Secrets**: Directly integrated with OS Keyring (macOS Keychain, Linux Secret Service).

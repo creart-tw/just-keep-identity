@@ -8,18 +8,19 @@
 ## 📝 任務清單 (Tasks)
 
 ### Phase 1: 發布自動化 (Release Automation)
-- [ ] **引入 cargo-dist**：配置 `cargo-dist` 以生成 GitHub Actions 流程，實現打 Tag 後自動編譯與上傳 Release Assets。
-- [ ] **跨平台編譯校驗**：在 GitHub Actions 中驗證 Linux 與 Windows 的編譯正確性。
+- [ ] **導入 cargo-release**：參照 `mission-automated-versioning.md` 實現自動版號管理。
+- [ ] **引入 cargo-dist**：配置 GitHub Actions 流程，實現打 Tag 後自動編譯。
 - [ ] **安裝腳本自動化**：生成支援 `curl | sh` 的快速安裝腳本。
 
 ### Phase 2: Homebrew 生態對接 (Homebrew Ecosystem)
-- [ ] **建立專屬 Tap**：建立 `lichih/homebrew-jki` 儲存庫。
-- [ ] **自動化 Formula 更新**：配置 CI 流程，每當新版本發布時自動更新 brew 用的 Ruby 腳本。
-- [ ] **驗證安裝**：測試 `brew install lichih/jki/jki` 的流暢度。
+- [x] **建立專屬 Tap**：已建立 `lichih/homebrew-jki` 並完成初始同步。
+- [ ] **自動化 Formula 更新**：配置 CI 流程，每當新版本發布時自動更新。
+- [x] **驗證安裝**：已完成。透過 `docs/homebrew-test-guide.md` 驗證了隔離環境下的 Tap 安裝。
 
-### Phase 3: 多平台打包優化 (Platform Packaging)
-- [ ] **macOS App Bundle 簽名**：完善 `make sign` 流程，確保 `jki-agent.app` 在其他 Mac 上不會被 Gatekeeper 阻擋。
-- [ ] **Windows 便攜版**：針對 Windows 生成不需要安裝的 `.zip` 包。
+### Phase 3: 多平台分級打包 (Tiered Packaging)
+- [ ] **認證鏈自動化 (macOS)**：整合 `.env.macos` 資訊到發布流程，確保正式版具備 **Apple 簽名與公證**。
+- [ ] **CLI-Only 發布 (Win/Linux)**：優化編譯配置，為非 macOS 平台產出輕量化、無 Agent 的純 CLI 二進位檔。
+- [ ] **Windows 信任度解決方案**：研究如何在無簽名情況下降低 SmartScreen 攔截感。
 
 ---
 

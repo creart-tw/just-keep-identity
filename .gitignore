@@ -46,3 +46,6 @@ data/
 private/
 config.json
 *.stable
+.env.macos
+*.p12
+*.keychain
